@@ -192,8 +192,20 @@ void HardwareDriver::rosNode()
         }
     );
 
+    // 超声请求周期可调：默认 0.1s=10次/秒，匹配 MCU 上限"四路超声每秒10帧"(MCU侧工程师 2026-06-13 告知)。
+    // 配合下方 sendUltraCommand 的右侧优先调度→右前/右后各 ~3.3Hz、前左/前右各 ~1.67Hz(原四路均 0.83Hz)。
+    // 实际刷新率 = min(请求率, MCU 应答率)；可经 ROS 参数 ultra_poll_period 覆盖、夹在 [0.05,0.5]s 防误设。
+    double ultra_poll_period = 0.1;
+    nh_.param("ultra_poll_period", ultra_poll_period, 0.1);
+    if (ultra_poll_period < 0.05) ultra_poll_period = 0.05;
+    if (ultra_poll_period > 0.5)  ultra_poll_period = 0.5;
+    // 右侧优先调度[3,4,1,3,4,2]：右前/右后每3拍刷新、前左/前右每6拍刷新(非均匀)。
+    ROS_INFO("ultra_poll_period = %.3f s | right(rf/rr) ~%.2f s / %.2f Hz | front(fl/fr) ~%.2f s / %.2f Hz",
+             ultra_poll_period,
+             ultra_poll_period * 3.0, 1.0 / (ultra_poll_period * 3.0),
+             ultra_poll_period * 6.0, 1.0 / (ultra_poll_period * 6.0));
     ros::Timer ultra_timer = nh_.createTimer(
-        ros::Duration(0.3),  // 300ms请求一次
+        ros::Duration(ultra_poll_period),  // 可调请求周期(默认0.1s)
         [this](const ros::TimerEvent&) {
             this->sendUltraCommand();
         }
@@ -1914,33 +1926,24 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
 void HardwareDriver::sendUltraCommand(){
     MSG_Type send_type = CM_DEV_CTL_TYPE;
     int send_id = 4;
-    uint8_t ultra_command = 1;
-    
-    // 轮流请求4个超声波传感器
-    static int ultra_counter = 0;  // 计数器 0,1,2,3 轮流
-    
-    // 根据计数器选择要请求的超声波ID
-    if (ultra_counter == 0) {
-        ultra_command = 1;  // 请求超声波1 (右侧前)
-        // cout << "send ultra 1 (右侧前)" << endl;
-    } else if (ultra_counter == 1) {
-        ultra_command = 2;  // 请求超声波2 (右侧后)
-        // cout << "send ultra 2 (右侧后)" << endl;
-    } else if (ultra_counter == 2) {
-        ultra_command = 3;  // 请求超声波3 (前方左红外)
-        // cout << "send ultra 3 (前方左红外)" << endl;
-    } else {
-        ultra_command = 4;  // 请求超声波4 (前方右红外)
-        // cout << "send ultra 4 (前方右红外)" << endl;
-    }
-    
+
+    // 物理映射(以 move_controller 消费侧为准，用户 2026-06-13 定)：
+    //   command/id 1 -> data[0]=前左, 2 -> data[1]=前右, 3 -> data[2]=右前, 4 -> data[3]=右后
+    //   (原注释把 1/2 标成"右侧"、3/4 标成"前方红外"系笔误，已订正)
+    // 右侧(3,4)=沿墙距离环的连续控制输入 -> 多分配请求；前方(1,2)=前障检测 -> 少分配。
+    // 6 拍右侧优先调度 [3,4,1,3,4,2]：配合 0.1s 周期(MCU 上限~10帧/秒)
+    //   -> 右前/右后各 ~3.3Hz(每3拍/0.3s)、前左/前右各 ~1.67Hz(每6拍/0.6s)。
+    // 前障带宽足够：1.5m 处检出、0.35m/s 下到接触约 4.3s，1.67Hz 给 ~7 帧新值。
+    static const uint8_t ultra_schedule[6] = {3, 4, 1, 3, 4, 2};
+    static int ultra_counter = 0;  // 单线程 ros::spin() 下无竞态；若改 AsyncSpinner 需加锁
+    uint8_t ultra_command = ultra_schedule[ultra_counter];
+
     // 发送命令
     sendMessage(send_type, send_id, (uint8_t *)&ultra_command, (uint8_t)sizeof(ultra_command));
-    
-    // 计数器递增，实现轮流
+
     ultra_counter++;
-    if (ultra_counter >= 4) {
-        ultra_counter = 0;  // 重置为0，重新开始
+    if (ultra_counter >= 6) {
+        ultra_counter = 0;  // 6 拍一循环
     }
 }
 

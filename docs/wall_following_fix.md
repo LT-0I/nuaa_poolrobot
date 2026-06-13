@@ -2,7 +2,7 @@
 
 > 本文档对照本仓库源码说明**已实施的代码修改逻辑与效果**。
 > 配套诊断见 [wall_following_diagnosis.md](wall_following_diagnosis.md)。
-> 改动文件：[`sonar_slam/src/move_controller.cpp`](../sonar_slam/src/move_controller.cpp)、[`sonar_slam/include/sonar_slam/move_controller.h`](../sonar_slam/include/sonar_slam/move_controller.h)。仅改活跃函数 `walkStraightWithWallAvoidanceAdvanced`、`ultraCallback`，死代码块与 `alignToRightWallOnly` 未动。
+> 改动文件：消费侧 [`sonar_slam/src/move_controller.cpp`](../sonar_slam/src/move_controller.cpp)、[`sonar_slam/include/sonar_slam/move_controller.h`](../sonar_slam/include/sonar_slam/move_controller.h)（仅改活跃函数 `walkStraightWithWallAvoidanceAdvanced`、`ultraCallback`，死代码块与 `alignToRightWallOnly` 未动）；生产侧 [`mars_serial_server/src/hardware_driver.cpp`](../mars_serial_server/src/hardware_driver.cpp)（仅改 `rosNode` 超声定时器与 `sendUltraCommand` 调度，见 §5）。
 
 > **未编译验证**：本机无 ROS 环境，需在机器人上 `catkin_make -j1`（内存小，禁多核）。控制律的符号/收敛/不撞墙已用独立离线仿真穷举验证（无 ROS，复现见仓外实验目录）。
 
@@ -59,12 +59,35 @@
 
 `config_wall_align_` 默认 1.0→**2.0**（[成员初始化](../sonar_slam/src/move_controller.cpp#L852) 与 `wall_align` 参数默认），可经 launch 参数覆盖。头注释已从"保留备用"更正为"目标距右墙距离"（[L167](../sonar_slam/include/sonar_slam/move_controller.h#L167)）。
 
+## 5. 驱动层：超声请求加速 + 右侧优先调度（让数据更新鲜）
+
+> §1–§4 只在消费侧"识别"旧帧；本节从**生产侧**根治：以前右侧每路真实只 ~0.83Hz，是因为驱动 300ms 才请求一次、四路平均轮询。
+
+改 [`mars_serial_server/src/hardware_driver.cpp`](../mars_serial_server/src/hardware_driver.cpp)，两处：
+
+- **请求周期 0.3s→0.1s，且可配**（[`rosNode` L198](../mars_serial_server/src/hardware_driver.cpp#L198)）：新增 ROS 参数 `ultra_poll_period`（默认 0.1s=10 次/秒，夹在 `[0.05,0.5]s` 防误设），匹配 MCU 上限"四路超声每秒 10 帧"（MCU 侧工程师 2026-06-13 告知）。启动时 `ROS_INFO` 打印实际每路刷新率，便于现场核对。
+- **右侧优先 6 拍调度 `{3,4,1,3,4,2}`**（[`sendUltraCommand` L1937](../mars_serial_server/src/hardware_driver.cpp#L1937)）：右侧（命令 3/4）是沿墙距离环的连续控制输入，每 6 拍占 2 拍；前方（命令 1/2）只做前障检测，各占 1 拍。
+
+效果（默认 0.1s 周期）：
+
+| 通道 | 旧（300ms 均轮询） | 新（100ms 右优先） |
+|---|---|---|
+| 右前/右后（命令 3/4，距离环用） | 0.83 Hz | **~3.3 Hz**（每 3 拍/0.3s） |
+| 前左/前右（命令 1/2，前障用） | 0.83 Hz | **~1.7 Hz**（每 6 拍/0.6s） |
+
+**单调改善、无回退**：总请求带宽由 3.3 次/秒提到 10 次/秒（×3），因此**每一路的请求率都不低于旧的 0.83Hz**——右侧大涨、前方仍翻倍。无论 MCU 是"按请求即测"还是"内部缓存最新值"模型，实际刷新率 = min(请求率, MCU 内部率)，都不会低于旧基线（论证见仓外实验目录 `analysis/review/REVIEW_AUDIT.md`）。确切量级以现场实测 `ultra_right_seq_` 推进速率为准。
+
+> 物理映射以**消费侧 `move_controller` 为准**（用户 2026-06-13 定）：命令 1→`data[0]`=前左、2→`data[1]`=前右、3→`data[2]`=右前、4→`data[3]`=右后。驱动原注释把 1/2 标"右侧"、3/4 标"前方红外"系笔误，已订正。
+>
+> ⚠ 改了 C++ → 必须在机器人上 `catkin_make -j1`（`mars_serial_server` 与 `sonar_slam` 两个包都要重编），详见仓外实验目录的编译单。
+
 ---
 
 ## 现场前置确认（控制律有效性的前提）
 
-1. **遮挡定标**：确认 `data[2]/[3]` 确为右侧前/后超声（驱动请求侧通道标号存在历史冲突）。整套律依赖此映射。
+1. **遮挡定标**：以消费侧映射为准（命令 3/4 = 右前/右后 = `data[2]/[3]`，用户已定），现场遮挡定标只为**复核**无误，非再判定标号。
 2. **3m 掠射回波存活性**：距墙 2m 时右侧超声须有有效回波，否则律退回 odom 漂移兜底（修复①失效）。建议沿墙实验前先静态采集确认。
-3. 增益按首轮 CSV 日志精调。
+3. **实测右侧刷新率**：跑起来后量 `ultra_right_seq_` 的推进速率，确认右前/右后是否到 ~3Hz（验证 §5 的右侧优先确实生效、MCU 不是缓存模型卡上限）。
+4. 增益按首轮 CSV 日志精调。
 
 *实施后按双对抗评审 + 对照活仓核对 + `catkin_make -j1` 编译下发；详见仓外实验目录的编译单/操作单。*
