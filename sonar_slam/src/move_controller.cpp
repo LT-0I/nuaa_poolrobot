@@ -1237,7 +1237,11 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             const float MAX_CORR = 0.08f;      // 沿墙纠偏限幅 (cmd; ×6.4≈0.51 rad/s)
             const float K_ODOM_HOLD = 1.0f;    // 丢墙时 odom 保航向增益 (cmd/rad)
             const float MAX_ODOM_CORR = 0.10f;
-            const float STALE_SEC = 3.0f;      // 右侧超声陈旧看门狗(s)
+            const float STALE_SEC = 1.5f;      // 右侧超声陈旧看门狗(s)：D-41 把右侧刷新提到 ~3.3Hz(0.3s/路)后，
+                                               // 1.5s≈5×刷新周期，既留漏帧/值不变的裕度，又把丢回波时的盲走距离
+                                               // 从 ~1m(旧3s)压到 ~0.5m(0.35m/s)。早先 3.0 是按旧 0.83Hz(1.2s/路)定的、现已过松。
+                                               // ⚠ 依赖 D-41 驱动(ultra_poll_period≤0.1s→右0.3s/路)：若驱动回退到旧 1.2s/路、
+                                               //   或把 ultra_poll_period 调到 ~0.5s，1.5s 裕度不足会在超声环↔odom兜底间抖动，须同步上调本值
 
             // 快照右侧超声(加锁，修复原裸读竞态) + 新鲜度
             float front, rear; ros::Time ultra_stamp;

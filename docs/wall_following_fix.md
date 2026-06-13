@@ -14,7 +14,7 @@
 |---|---|---|
 | ① 无"距墙距离"控制环 | 直行段改成**距墙距离环 + 平行环**，复活 `config_wall_align_`（默认 2.0m） | [straight law @ L1222](../sonar_slam/src/move_controller.cpp#L1222) |
 | ② 拐角用 0.83Hz 旧超声值在 20Hz 循环提前停 | 拐角改 **odom 粗转 + "新鲜帧"精修(stop-and-settle)**；新增超声新鲜度计数 | [corner @ L1025](../sonar_slam/src/move_controller.cpp#L1025) · [ultraCallback @ L1738](../sonar_slam/src/move_controller.cpp#L1738) |
-| ③ 拐后错航向被 odom 锁成零基准 | **超声为主、odom 仅丢墙兜底**；超声有效时持续把 odom 参考归零 | [L1257](../sonar_slam/src/move_controller.cpp#L1257) / [L1276](../sonar_slam/src/move_controller.cpp#L1276) |
+| ③ 拐后错航向被 odom 锁成零基准 | **超声为主、odom 仅丢墙兜底**；超声有效时持续把 odom 参考归零 | [L1260](../sonar_slam/src/move_controller.cpp#L1260) / [L1280](../sonar_slam/src/move_controller.cpp#L1280) |
 
 ---
 
@@ -40,7 +40,7 @@
 
 [straight law @ L1222](../sonar_slam/src/move_controller.cpp#L1222)，替换原"odom 为主的四分支双传感器逻辑"。
 
-- 超声有效且新鲜（[L1257](../sonar_slam/src/move_controller.cpp#L1257)）：
+- 超声有效且新鲜（[L1260](../sonar_slam/src/move_controller.cpp#L1260)）：
   ```
   d      = (右前 + 右后) / 2          // 距右墙
   e_par  = 右后 − 右前                 // >0: 机头朝墙
@@ -48,8 +48,8 @@
   ```
   这是标准墙跟随：距离项给**横向位置回正力**（消灭根因①——以前只有平行项，任何残差航向都让距墙单调漂移），平行项提供航向阻尼。
   同时把 odom 参考归零（`total_yaw_change=0`），使"丢墙兜底"保持的是**当前由超声建立的航向**，而非拐弯遗留的错航向（消灭根因③）。
-- 仅一侧有效（[L1272](../sonar_slam/src/move_controller.cpp#L1272)）：按既有约定轻纠以重捕获，并刷新 odom 基准。
-- 两侧无效/陈旧>3s（[L1276](../sonar_slam/src/move_controller.cpp#L1276)）：退回 odom 短时兜底保航向（odom 是裸陀螺、会漂，只作兜底）。
+- 仅一侧有效（[L1273](../sonar_slam/src/move_controller.cpp#L1273)）：按既有约定轻纠以重捕获，并刷新 odom 基准。
+- 两侧无效/陈旧>**1.5s**（[L1280](../sonar_slam/src/move_controller.cpp#L1280)）：退回 odom 短时兜底保航向（odom 是裸陀螺、会漂，只作兜底）。陈旧看门狗 `STALE_SEC` 由 3.0→**1.5s**（[L1240](../sonar_slam/src/move_controller.cpp#L1240)）：D-41 把右侧超声提到 ~3.3Hz(0.3s/路)后，1.5s≈5×刷新周期仍稳，且把丢回波时的盲走距离从 ~1m 压到 ~0.5m(0.35m/s)。⚠ 该值依赖 D-41 驱动；若驱动回退旧 1.2s/路须同步上调。
 - 读右侧超声统一加 `sensor_mutex_` 锁，顺带修掉原裸读竞态。
 
 **增益**（[L1235](../sonar_slam/src/move_controller.cpp#L1235)）：`K_DIST=0.03, K_PAR=0.30, 限幅 0.08`。
