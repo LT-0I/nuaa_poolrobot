@@ -1,0 +1,54 @@
+<!-- sonar_slam/launch/sonar_slam.launch -->
+<launch>
+    <!-- ========== 参数配置 ========== -->
+    <!-- 注意：此launch文件仅启动SLAM核心节点 -->
+    <!-- 硬件驱动(mars_serial_server)和声纳处理(sonar_realtime_mapper)需单独启动 -->
+    
+    <!-- ========== SLAM算法节点 ========== -->
+    <node name="sonar_slam_node" pkg="sonar_slam" type="sonar_slam_node" output="screen">
+        
+        <!-- ========== 【关键】TF设置 ========== -->
+        <param name="publish_map_tf" value="true" />      <!-- 唯一发布map->odom -->
+        <param name="use_tf_filter" value="true" />       <!-- 启用TF滤波减少抖动 -->
+        <param name="tf_smooth_factor" value="0.3" />     <!-- 滤波强度 0.1-0.8 -->
+        <param name="use_odom_timestamp" value="true" />  <!-- 使用里程计时间戳 -->
+        <param name="max_tf_delay" value="0.1" />         <!-- 最大允许延迟(秒) -->
+        
+        <!-- ========== 地图更新参数 ========== -->
+        <param name="update_interval" value="10.0" />  <!-- 改为10秒更合理 -->
+        
+        <!-- ========== 地图参数 ========== -->
+        <param name="map_resolution" value="0.05" />
+        <param name="map_width" value="400" />
+        <param name="map_height" value="400" />
+        <param name="map_origin_x" value="-10.0" />
+        <param name="map_origin_y" value="-10.0" />
+        
+        <!-- ========== 探索参数 ========== -->
+        <param name="stability_threshold" value="10" />  <!-- 增加为10更稳定 -->
+        <param name="frontier_weight_distance" value="0.4" />
+        <param name="frontier_weight_unknown" value="0.6" />
+        
+        <!-- ========== 控制参数 ========== -->
+        <param name="max_linear_speed" value="0.2" />
+        <param name="max_angular_speed" value="0.5" />
+        <param name="goal_tolerance" value="0.3" />
+        
+        <!-- ========== 传感器配置 ========== -->
+        <param name="use_ultrasonic" value="true" />      <!-- 使用超声波避障 -->
+        <param name="use_infrared" value="true" />        <!-- 使用红外避障 -->
+        <param name="use_imu" value="true" />             <!-- 使用IMU -->
+        
+        <!-- ========== 协同模式配置 ========== -->
+        <param name="collaborative_mode" value="true" />  <!-- 与声纳节点协同 -->
+        
+    </node>
+    
+    <!-- ========== 可选：RVIZ启动 ========== -->
+    <!-- 取消注释以自动启动RVIZ -->
+    <!-- 
+    <node name="rviz" pkg="rviz" type="rviz" 
+          args="-d $(find sonar_slam)/config/sonar_slam.rviz" />
+    -->
+    
+</launch>

@@ -1,0 +1,46 @@
+<!-- launch/sonar_visualization.launch -->
+<launch>
+    <!-- 参数服务器 -->
+    <rosparam command="load" file="$(find sonar_slam)/config/debug_params.yaml" />
+    
+    <!-- 声纳实时建图节点 -->
+    <node pkg="sonar_slam" type="sonar_realtime_mapper" name="sonar_realtime_mapper" output="screen">
+        <param name="mode" value="realtime" />
+        <param name="serial_port" value="/dev/ttyACM0" />
+        <param name="baudrate" value="115200" />
+        
+        <!-- 基础参数 -->
+        <param name="max_range" value="8.0" />
+        <param name="min_range" value="0.5" />
+        <param name="min_intensity" value="50.0" />
+        
+        <!-- 新增处理参数 -->
+        <param name="enable_filtering" value="true" />
+        <param name="filter_intensity_threshold" value="50.0" />
+        <param name="enable_clustering" value="true" />
+        <param name="enable_wall_detection" value="true" />
+        <param name="wall_intensity_threshold" value="150.0" />
+        <param name="enable_corner_detection" value="true" />
+        
+        <!-- 重映射话题 -->
+        <remap from="sonar/pointcloud" to="/sonar/raw_points" />
+    </node>
+    
+    <!-- 可选：启动可视化处理器（如果需要额外的处理） -->
+    <!--
+    <node pkg="sonar_slam" type="sonar_visualizer" name="sonar_visualizer" output="screen">
+        <param name="contour_threshold" value="2.0" />
+        <param name="cluster_tolerance" value="0.15" />
+        <param name="min_cluster_size" value="20" />
+    </node>
+    -->
+    
+    <!-- RViz可视化 -->
+    <node pkg="rviz" type="rviz" name="rviz" 
+          args="-d $(find sonar_slam)/config/sonar_visualization.rviz" />
+    
+    <!-- 调试工具 -->
+    <node pkg="rqt_console" type="rqt_console" name="console" />
+    <node pkg="rqt_graph" type="rqt_graph" name="graph" />
+    <node pkg="rqt_reconfigure" type="rqt_reconfigure" name="reconfigure" />
+</launch>

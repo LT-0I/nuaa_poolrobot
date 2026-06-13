@@ -1,0 +1,111 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Option Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+
+# Sensor
+UseImuData:   1
+UseOdomEtry:  1
+UseSonarDst:  0
+UseLaserFan:  1
+UseStereoImg: 1
+
+# ability
+HitProbability:  0.8
+MissProbability: 0.45
+
+# Map
+MapLimits: 1500
+MapResolution: 0.05
+
+LinearSearchWindow:  1.0
+AngularSearchWindow: 5.0
+BranchBoundDepth: 7
+
+
+MaxLength: 0.7
+MinNumPoints: 200
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+Camera.type: "PinHole"
+
+# Camera calibration and distortion parameters (OpenCV) (equal for both cameras after stereo rectification)
+Camera.fx: 490.1137623782296
+Camera.fy: 491.04843784281417
+Camera.cx: 364.54680201594545
+Camera.cy: 184.7219476719719
+
+Camera.width: 640
+Camera.height: 400
+
+
+LEFT.height: 480
+LEFT.width: 640
+LEFT.D: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [-0.443569, 0.153402, -0.002760, -0.003886, 0.000000]
+LEFT.K: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [437.99451, 0.0, 315.02759, 0.0, 438.21397, 208.04505, 0.0, 0.0, 1.0]
+LEFT.R:  !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [0.99961504, -0.0032387 ,  0.02755509,
+          0.00319753,  0.9999937 ,  0.00153812,
+         -0.0275599 , -0.00144942,  0.9996191 ]
+LEFT.P:  !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [406.49838,    0.     ,  294.10121,    0.     ,
+            0.     ,  406.49838,  204.6277 ,    0.     ,
+            0.     ,    0.     ,    1.     ,    0.   ]
+
+
+RIGHT.height: 480
+RIGHT.width: 640
+RIGHT.D: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [-0.451516, 0.162954, -0.003920, -0.000136, 0.000000]
+RIGHT.K: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [442.01428, 0.0, 305.07139, 0.0, 441.86372, 208.71054, 0.0, 0.0, 1]
+RIGHT.R:  !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [0.99979626,  0.00613665,  0.01922958,
+         -0.00610792,  0.99998014, -0.00155272,
+         -0.01923872,  0.00143495,  0.99981389]
+RIGHT.P:  !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [406.49838,    0.     ,  294.10121,  -32.62929,
+            0.     ,  406.49838,  204.6277 ,    0.     ,
+            0.     ,    0.     ,    1.     ,    0.   ]
+
+
+
+
+
+#--------------------------------------------------------------------------------------------
+# IMU Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+IMU.NoiseGyro: 1.8102854464602264e-03  #1.6968e-04 
+IMU.NoiseAcc: 2.0661229503548081e-02 #2.0e-3
+IMU.GyroWalk: 3.1575976964798592e-05 
+IMU.AccWalk: 3.9283686126949570e-04  # 3e-03
+IMU.Frequency: 100

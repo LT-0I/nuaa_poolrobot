@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "iostream": "cpp",
+        "ostream": "cpp"
+    },
+    "python.autoComplete.extraPaths": [
+        "/home/oldking/Documents/sansy_ws/devel/lib/python2.7/dist-packages",
+        "/home/oldking/catkin_google_ws/install_isolated/lib/python2.7/dist-packages",
+        "/opt/ros/melodic/lib/python2.7/dist-packages"
+    ]
+}

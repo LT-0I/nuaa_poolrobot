@@ -1,0 +1,8 @@
+test_data/
+converted_sonar_logs/
+sample_data/generated/
+return_home_profile.csv
+*_profile.csv
+__pycache__/
+*.pyc
+

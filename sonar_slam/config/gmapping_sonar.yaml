@@ -1,0 +1,48 @@
+# Gmapping参数配置 - 针对水下声纳优化
+# 注意：Gmapping使用ROS参数，不是嵌套结构
+
+# 基本参数
+map_update_interval: 5.0          # 地图更新间隔（秒）
+transform_publish_period: 0.05     # TF发布周期
+
+# 声纳特性参数
+maxUrange: 8.0                     # 最大有效距离（声纳通常8-10米）
+maxRange: 12.0                     # 最大探测距离
+
+# 粒子滤波参数
+particles: 30                      # 减少粒子数（声纳数据稀疏）
+minimumScore: 50.0                # 降低最小分数阈值
+
+# 地图参数
+delta: 0.1                         # 降低分辨率（声纳精度较低）
+xmin: -15.0                        # 扩大地图边界
+xmax: 15.0
+ymin: -15.0
+ymax: 15.0
+
+# 似然场参数
+sigma: 0.3                         # 增大标准差（声纳误差较大）
+lstep: 0.1                         # 增大步长
+astep: 0.1                         # 增大步长
+
+# 重采样参数
+resampleThreshold: 0.3            # 降低重采样阈值
+linearUpdate: 2.0                  # 增大线性更新阈值
+angularUpdate: 0.8                 # 增大角度更新阈值
+
+# 采样参数
+kernelSize: 3                     # 增大核大小
+llsamplerange: 0.1                # 增大采样范围
+llsamplestep: 0.1                 # 增大采样步长
+lasamplerange: 0.05               # 角度采样范围
+lasamplestep: 0.05                # 角度采样步长
+
+# 阈值参数
+occ_thresh: 0.25                   # 占用阈值
+free_thresh: 0.15                  # 自由阈值
+
+# 坐标系设置（这些通过launch文件remap）
+# scan_topic: /sonar/scan
+# odom_frame: odom
+# base_frame: base_link
+# map_frame: map

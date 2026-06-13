@@ -1,0 +1,30 @@
+<!-- sonar_slam/launch/debug_static_map.launch -->
+<launch>
+    <!-- 静态地图构建器（调试模式） -->
+    <node name="sonar_map_builder" pkg="sonar_slam" type="sonar_map_builder" output="screen">
+        <!-- 数据文件路径 -->
+        <param name="data_file" value="$(find sonar_slam)/data/20251127-160606453.bin" />
+        
+        <!-- 数据过滤参数 -->
+        <param name="max_range" value="10.0" />
+        <param name="min_range" value="0.2" />
+        <param name="min_intensity" value="30.0" />
+        
+        <!-- 地图参数 -->
+        <param name="map_resolution" value="0.05" />
+        <param name="map_width" value="400" />
+        <param name="map_height" value="400" />
+        <param name="map_origin_x" value="-10.0" />
+        <param name="map_origin_y" value="-10.0" />
+        
+        <!-- 调试参数 -->
+        <param name="debug_mode" value="true" />
+        <param name="save_csv" value="true" />
+        <param name="csv_filename" value="/tmp/sonar_debug_data.csv" />
+    </node>
+    
+    <!-- 运行RViz进行可视化 -->
+    <node name="rviz" pkg="rviz" type="rviz" 
+          args="-d $(find sonar_slam)/config/debug_static_map.rviz" />
+    
+</launch>

@@ -1,0 +1,9 @@
+# 直线移动服务
+float32 distance      # 移动距离（米），正数前进，负数后退
+float32 timeout       # 超时时间（秒），0表示使用默认值
+ 
+---
+bool success          # 是否成功
+string message        # 结果信息
+float32 actual_distance  # 实际移动距离
+float32 final_error    # 最终位置误差

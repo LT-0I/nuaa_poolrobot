@@ -1,0 +1,10 @@
+# 移动到指定位姿
+float32 x             # 目标X坐标（米）
+float32 y             # 目标Y坐标（米）
+float32 theta         # 目标朝向角度（度）
+float32 timeout       # 超时时间（秒）
+---
+bool success
+string message
+float32 position_error  # 位置误差
+float32 angle_error    # 角度误差

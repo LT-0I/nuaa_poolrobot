@@ -1,0 +1,59 @@
+<!-- ~/sonar_ws/src/sonar_slam/config/debug_map.rviz -->
+<?xml version="1.0" encoding="utf-8"?>
+<rviz>
+  <Global Options>
+    <Fixed Frame>map</Fixed Frame>
+  </Global Options>
+  <Displays>
+    <!-- 网格 -->
+    <Display type="rviz/Grid">
+      <Name>Grid</Name>
+      <Enabled>true</Enabled>
+      <Cell Size>1</Cell Size>
+    </Display>
+    
+    <!-- TF坐标系 -->
+    <Display type="rviz/TF">
+      <Name>TF</Name>
+      <Enabled>true</Enabled>
+    </Display>
+    
+    <!-- 占据栅格地图 -->
+    <Display type="rviz/Map">
+      <Name>Occupancy Grid</Name>
+      <Enabled>true</Enabled>
+      <Topic>/sonar_occupancy_map</Topic>
+      <Alpha>0.7</Alpha>
+      <Color Scheme>map</Color Scheme>
+    </Display>
+    
+    <!-- 点云 -->
+    <Display type="rviz/PointCloud2">
+      <Name>Sonar PointCloud</Name>
+      <Enabled>true</Enabled>
+      <Topic>/sonar_map_pointcloud</Topic>
+      <Style>Points</Style>
+      <Size (Pixels)>2</Size>
+      <Alpha>0.5</Alpha>
+    </Display>
+    
+    <!-- 激光扫描 -->
+    <Display type="rviz/LaserScan">
+      <Name>Laser Scan</Name>
+      <Enabled>true</Enabled>
+      <Topic>/sonar_map_scan</Topic>
+      <Size (m)>0.05</Size>
+    </Display>
+  </Displays>
+  <Views>
+    <Current>
+      <Class>rviz/XYOrbit</Class>
+      <Distance>20</Distance>
+      <Focal Point>
+        <X>0</X>
+        <Y>0</Y>
+        <Z>0</Z>
+      </Focal Point>
+    </Current>
+  </Views>
+</rviz>

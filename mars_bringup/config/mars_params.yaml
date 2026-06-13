@@ -1,0 +1,39 @@
+# ----------------------------------------------------------------
+# This is the config of ROS , which can be fixed by the UI.
+# This file is very Important!!!!
+# Create date : 2022-05-25 by oldking
+# ----------------------------------------------------------------
+
+# motion_params
+limit_speed           :   0.2
+limit_omega           :   0.6
+max_acce              :   1.0
+max_alpha             :   1.0
+
+# machine_params
+wheel_resolution      :   2731
+wheel_reduction       :   20
+wheel_diameter        :   0.1
+wheel_spacing         :   0.2
+
+# control_params
+xPid                  :   [ 0.6, 1.0, 0.0 ]
+yPid                  :   [ 6.0, 0.95, 0.0] 
+thetaPid              :   [ 0.5, 1.5, 0.0 ]
+
+# lidar_params
+# ----------------------------------------------------------------------------------
+# Laser Config, "deg"
+r2000_node:
+    scan_range   : [ -95.0, 95.0 ]    # [ start  end ], deg
+    scan_cull_n  : 0                    # culling laser range num, max = 2
+    scan_cull_r1 : [ -0.0, -0.0 ]       # 1st cull range, [ start  end ]
+    scan_cull_r2 : [ -0.0, 0.0  ]       # 2nd cull range, [ start  end ]
+
+# laser mount position
+laser_vector3    : [ 0.340, 0.0, 0.0 ]
+laser_quaternion : [ 0.0, 0.0, 0.0, 1.0 ]
+
+# laser avoid obstacale range and slow down distance
+# [ x_min  x_max  y_min  y_max  obst_slow_down_dis]
+obstacle_rect         :   [ -0.1, 0.1, -0.3, 0.3, 1.2 ]

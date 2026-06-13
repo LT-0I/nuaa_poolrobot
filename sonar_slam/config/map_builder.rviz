@@ -1,0 +1,80 @@
+# config/map_builder.rviz
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+
+Visualization Manager:
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Cell Size: 1
+      Color: 160; 160; 164
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: map
+      Value: true
+    
+    - Class: rviz/Map
+      Name: Map
+      Alpha: 0.7
+      Color Scheme: map
+      Topic: /sonar_map
+      Value: true
+    
+    - Class: rviz/PointCloud2
+      Name: PointCloud
+      Alpha: 1
+      Autocompute Intensity Bounds: false
+      Channel Name: intensity
+      Color Transformer: Intensity
+      Decay Time: 0
+      Max Intensity: 255
+      Min Intensity: 0
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Style: Points
+      Topic: /sonar_pointcloud2
+      Value: true
+    
+    - Class: rviz/LaserScan
+      Name: LaserScan
+      Alpha: 0.8
+      Color Transformer: Intensity
+      Decay Time: 0
+      Size (m): 0.05
+      Style: Points
+      Topic: /sonar_scan
+      Value: true
+    
+    - Class: rviz/Marker
+      Name: Marker
+      Namespace: sonar
+      Topic: /sonar_marker
+      Value: true
+    
+    - Class: rviz/TF
+      Name: TF
+      Marker Scale: 0.5
+      Value: true
+  
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 15
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+      Pitch: 0.5
+      Yaw: 0
+    Saved: ~

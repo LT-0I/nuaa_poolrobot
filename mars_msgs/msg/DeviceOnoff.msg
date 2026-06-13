@@ -1,0 +1,7 @@
+uint8 wheel_onff_sta
+uint8 actor_onoff_sta
+uint8 baterry_onoff_sta
+uint8 camera_onoff_sta
+uint8 audio_onoff_sta
+uint8 signal_onoff_sta
+uint8 lighting_onoff_sta

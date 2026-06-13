@@ -1,0 +1,60 @@
+<launch>
+    <!-- 参数：是否启动RViz -->
+    <arg name="rviz" default="true" />
+    
+    <!-- ==================== 声纳实时建图节点 ==================== -->
+    <node name="sonar_realtime_mapper" pkg="sonar_slam" type="sonar_realtime_mapper" output="screen">
+        <!-- 串口配置 -->
+        <param name="serial_port" value="/dev/ttyACM0" />
+        <param name="baudrate" value="115200" />  <!-- 修正：baudrate不是baud_rate -->
+        
+        <!-- 数据过滤参数 -->
+        <param name="max_range" value="15.0" />
+        <param name="min_range" value="0.3" />
+        <param name="min_intensity" value="60.0" />
+        
+        <!-- 输出配置 -->
+        <param name="enable_csv_logging" value="false" />
+        
+        <!-- 地图参数（与SLAM保持一致） -->
+        <param name="map_resolution" value="0.05" />
+        <param name="map_width" value="400" />
+        <param name="map_height" value="400" />
+        <param name="map_origin_x" value="-10.0" />
+        <param name="map_origin_y" value="-10.0" />
+    </node>
+    
+    <!-- ==================== 自定义SLAM动态建图节点 ==================== -->
+    <node name="sonar_slam_node" pkg="sonar_slam" type="sonar_slam_node" output="screen">
+        <!-- 建图参数（与实时映射器一致） -->
+        <param name="map_resolution" value="0.05" />
+        <param name="map_width" value="400" />
+        <param name="map_height" value="400" />
+        <param name="map_origin_x" value="-10.0" />
+        <param name="map_origin_y" value="-10.0" />
+        
+        <!-- 动态建图策略 -->
+        <param name="update_interval" value="5.0" />
+        <param name="stability_threshold" value="3" />
+        <param name="frontier_weight_distance" value="0.4" />
+        <param name="frontier_weight_unknown" value="0.6" />
+        
+        <!-- 导航控制 -->
+        <param name="max_linear_speed" value="0.15" />
+        <param name="max_angular_speed" value="0.3" />
+        <param name="goal_tolerance" value="0.5" />
+        
+        <!-- 覆盖完成条件 -->
+        <param name="coverage_complete_threshold" value="0.85" />
+    </node>
+    
+    <!-- ==================== TF配置 ==================== -->
+    <!-- 声纳在机器人上的位置（需要根据实际测量修改） -->
+    <node pkg="tf" type="static_transform_publisher" name="base_to_sonar" 
+          args="0.2 0 0.1 0 0 0 base_link sonar_frame 100" />
+    
+    <!-- ==================== RViz可视化 ==================== -->
+    <node name="rviz" pkg="rviz" type="rviz" 
+          args="-d $(find sonar_slam)/config/slam_view.rviz"   
+          if="$(arg rviz)" />
+</launch>

@@ -1,0 +1,15 @@
+<launch>
+  <node pkg="mars_serial_server" type="serial_server_exe" name="serial_server_node" respawn="true" respawn_delay="10" output="screen">
+    <param name="port" value="/dev/ttyS0"/>
+    <param name="baud" value="115200"/>
+  </node>
+
+<!-- <node pkg="serial_demo" type="serial_demo" name="serial_port" respawn="true" respawn_delay="1" output="screen">
+    <param name="port" value="/dev/ttyUSB0"/>
+    <param name="baud" value="57600"/>
+  </node> -->
+\
+
+  <!-- <node name="base_imu_link" pkg="tf" type="static_transform_publisher" args="0 0 0 0 0 0 /base_footprint /imu_link 50"/> -->
+
+</launch>

@@ -1,0 +1,68 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Displays:
+    # 基础显示
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 20
+    
+    # 占据栅格地图
+    - Class: rviz/Map
+      Name: Occupancy Grid
+      Enabled: true
+      Topic: /map
+      Alpha: 0.7
+      Color Scheme: map
+    
+    # 声纳扫描点
+    - Class: rviz/Marker
+      Name: Scan Points
+      Enabled: true
+      Topic: /frontiers
+      Namespace: scan_points
+    
+    # 前沿点
+    - Class: rviz/Marker
+      Name: Frontiers
+      Enabled: true
+      Topic: /frontiers
+      Namespace: frontiers
+    
+    # 当前目标
+    - Class: rviz/Marker
+      Name: Current Goal
+      Enabled: true
+      Topic: /current_goal
+    
+    # TF坐标系
+    - Class: rviz/TF
+      Name: TF
+      Enabled: true
+    
+    # 机器人模型（可选）
+    - Class: rviz/RobotModel
+      Name: Robot Model
+      Enabled: true
+      TF Prefix: ""
+    
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 15
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+      Pitch: 0.5
+      Yaw: 0

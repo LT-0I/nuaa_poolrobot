@@ -1,0 +1,44 @@
+# 声纳参数
+sonar:
+  max_range: 15.0
+  min_range: 0.3
+  min_intensity: 60.0
+  sound_speed: 1500.0
+  update_rate: 10.0  # Hz
+
+# 地图参数
+map:
+  resolution: 0.05
+  width: 400
+  height: 400
+  origin_x: -10.0
+  origin_y: -10.0
+
+# SLAM参数
+slam:
+  update_interval: 5.0
+  stability_threshold: 3
+  frontier_weight_distance: 0.4
+  frontier_weight_unknown: 0.6
+  exploration_complete_coverage: 0.85
+
+# 导航参数
+navigation:
+  max_linear_speed: 0.15
+  max_angular_speed: 0.3
+  goal_tolerance: 0.5
+  obstacle_check_distance: 2.0
+  wall_following_distance: 0.5
+
+# 传感器阈值
+sensors:
+  emergency_stop_distance: 0.2
+  slow_down_distance: 0.5
+  infrared_warning_distance: 0.8
+  ultrasonic_wall_distance: 1.0
+
+# 调试选项
+debug:
+  publish_visualization: true
+  log_level: info
+  save_intermediate_maps: false

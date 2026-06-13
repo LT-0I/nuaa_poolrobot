@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="mode" default="realtime" />
+    <arg name="serial_port" default="/dev/ttyACM0" />
+    <arg name="baudrate" default="115200" />
+    <arg name="max_range" default="8.0" />
+    <arg name="min_range" default="0.5" />
+    <arg name="min_intensity" default="50.0" />
+    <arg name="enable_csv_logging" default="true" />
+    
+    <node name="sonar_realtime_mapper" pkg="sonar_slam" type="sonar_realtime_mapper" output="screen">
+        <param name="mode" value="$(arg mode)" />
+        <param name="serial_port" value="$(arg serial_port)" />
+        <param name="baudrate" value="$(arg baudrate)" />
+        <param name="max_range" value="$(arg max_range)" />
+        <param name="min_range" value="$(arg min_range)" />
+        <param name="min_intensity" value="$(arg min_intensity)" />
+        <param name="enable_csv_logging" value="$(arg enable_csv_logging)" />
+    </node>
+    
+    <!-- 启动 RViz 进行可视化 -->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find sonar_slam)/config/slam_view.rviz" />
+</launch>

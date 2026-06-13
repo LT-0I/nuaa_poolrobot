@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 参数设置 -->
+    <arg name="data_file" default="$(find sonar_slam)/data/20251127-160606453.bin" />
+    <arg name="rviz" default="true" />
+    
+    <!-- 启动声纳地图构建器 -->
+    <node pkg="sonar_slam" type="sonar_map_builder" name="sonar_map_builder" output="screen">
+        <param name="data_file" value="$(arg data_file)" />
+        <param name="max_range" value="10.0" />
+        <param name="min_range" value="0.2" />
+        <param name="min_intensity" value="50.0" />
+        <param name="map_resolution" value="0.05" />
+        <param name="debug_mode" value="true" />
+    </node>
+    
+    <!-- 启动RViz - 使用正确的配置文件 -->
+    <group if="$(arg rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" 
+              args="-d $(find sonar_slam)/config/debug_static_map.rviz" />
+    </group>
+</launch>

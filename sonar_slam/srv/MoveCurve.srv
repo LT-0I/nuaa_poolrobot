@@ -1,0 +1,9 @@
+# 弓字形路径服务
+float32 length        # 弓字形长度（米）
+float32 width         # 弓字形宽度（米）
+int32   direction     # 方向：1-正向，-1-反向
+int32   segments      # 分段数，0表示连续
+---
+bool success
+string message
+float32 total_distance  # 总移动距离

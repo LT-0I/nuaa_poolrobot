@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 节点名与main函数保持一致 -->
+    <node name="linear_dual_sonar_mapper" pkg="sonar_slam" type="linear_dual_sonar_mapper" output="screen">
+        <!-- 串口配置 -->
+        <param name="serial_port" value="/dev/ttyACM0"/>
+        <param name="baudrate" value="115200"/>
+
+          <!-- Phase1建图参数 -->
+        <param name="phase1/enabled" value="true"/>
+        <param name="phase1/auto_move" value="true"/>
+        <param name="phase1/required_circles" value="1"/>
+        <param name="phase1/move_distance" value="4.1"/>
+        
+        <!-- 声纳参数 -->
+        <param name="max_range" value="10.0"/>
+        <param name="min_range" value="0.5"/>
+        <param name="min_intensity" value="50.0"/>
+        <param name="sound_speed" value="1500.0"/>
+        
+        <!-- 地图参数 -->
+        <param name="map_resolution" value="0.05"/>
+        <param name="map_width" value="400"/>
+        <param name="map_height" value="400"/>
+        <param name="map_origin_x" value="-10.0"/>
+        <param name="map_origin_y" value="-10.0"/>
+        
+        <!-- 导航模式配置 -->
+        <param name="enable_localization_mode" value="true"/>
+        <param name="localization_mode" value="true"/>
+        
+        <!-- Phase1建图配置 -->
+        <param name="phase1/enabled" value="false"/>
+        <param name="phase1/scan_duration" value="100.0"/>
+        <param name="phase1/wait_duration" value="60.0"/>
+        <param name="phase1/move_distance" value="4.12"/>
+        <param name="phase1/required_circles" value="1"/>
+    </node>
+    
+    <!-- 可选：启动RViz查看建图结果 -->
+    <!--
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find sonar_slam)/rviz/sonar_mapping.rviz"/>
+    -->
+</launch>

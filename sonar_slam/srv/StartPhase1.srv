@@ -1,0 +1,4 @@
+int32 max_submaps
+---
+bool success
+string message

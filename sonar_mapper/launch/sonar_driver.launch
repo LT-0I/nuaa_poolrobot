@@ -1,0 +1,8 @@
+<launch>
+  <!-- 启动 Sonar 驱动节点 -->
+  <node pkg="sonar_mapper" type="sonar_driver" name="sonar_driver_node" output="screen">
+    <!-- 可根据需要添加参数 -->
+    <!-- <param name="port" value="/dev/ttyUSB0"/> -->
+    <!-- <param name="baudrate" value="115200"/> -->
+  </node>
+</launch>

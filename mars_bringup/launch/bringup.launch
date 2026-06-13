@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 1. load mars config /-->	
+    <arg name="config_filepath" default="$(find mars_bringup)/config/mars_params.yaml" />
+        <rosparam command="load" file="$(arg config_filepath)" />
+
+    <param name="lightten_file_path" value="$(find mars_bringup)/config/lightten.yaml" />
+
+    <param name="map_file_path" value="$(find destan_mapping)/map/" />
+
+    <node pkg="mars_bringup" type="bringup_exe" name="bring_up_node" output="screen" ></node>
+
+    <!-- <include file="$(find mars_web_server)/launch/web_server.launch" /> -->
+    <!-- <include file="$(find mqtt_comms)/launch/mqtt_comms.launch" /> -->
+    <!-- <include file="$(find rtmp)/launch/rtmp.launch" /> -->
+    <include file="$(find mars_serial_server)/launch/serial_server.launch" />
+    <!-- <include file="$(find bluesea2)/launch/uart_lidar.launch" /> -->
+    <!-- <include file="$(find mars_location)/launch/mars_location.launch" /> -->
+    <!-- <include file="$(find destan_mapping)/launch/destan_mapping.launch" /> -->
+
+    <!-- <node pkg="mars_controller" type="mars_controller_exe" name="motion_controller_node" output="screen" ></node> -->
+</launch>

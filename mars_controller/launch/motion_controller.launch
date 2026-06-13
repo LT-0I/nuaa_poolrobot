@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="mars_controller" type="mars_controller_exe" name="motion_controller_node" output="screen" >
+    </node>
+</launch>

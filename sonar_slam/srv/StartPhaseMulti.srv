@@ -1,0 +1,6 @@
+# 请求：要建图的位置数量
+int32 num_positions
+---
+# 响应
+bool success
+string message

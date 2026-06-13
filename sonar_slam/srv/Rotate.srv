@@ -1,0 +1,9 @@
+# 原地旋转服务
+float32 angle         # 旋转角度（度），正数顺时针，负数逆时针
+float32 timeout       # 超时时间（秒）
+bool   absolute       # true:绝对角度，false:相对角度
+---
+bool success
+string message
+float32 final_angle   # 最终角度
+float32 angle_error   # 角度误差

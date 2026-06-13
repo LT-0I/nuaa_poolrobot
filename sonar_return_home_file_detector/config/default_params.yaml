@@ -1,0 +1,91 @@
+return_home_detector:
+  enabled: true
+
+  # Invocation timing is owned by the caller.
+  # This detector only evaluates the provided frame and returns a decision.
+
+  # Odom home-zone check. Yaw is diagnostic by default; position is the auxiliary
+  # confirmation after sonar scoring.
+  odom_candidate_radius: 1.0
+  odom_candidate_yaw_deg: 60.0
+  yaw_is_hard_constraint: false
+  use_adaptive_home_radius: true
+  sonar_before_odom_gate: true
+  pool_length: 0.0
+  pool_width: 0.0
+  adaptive_home_radius_ratio: 0.08
+  min_home_radius: 1.0
+  max_home_radius: 3.0
+  require_leave_home_before_return: true
+  leave_home_radius: 0.0
+  leave_home_radius_multiplier: 1.5
+  leave_home_radius_extra: 0.8
+  min_scans_before_return_check: 2
+
+  # Point cloud preprocessing.
+  min_range: 0.45
+  max_range: 8.0
+  min_intensity: 120.0
+  voxel_leaf_size: 0.05
+  max_points_after_filter: 1200
+  max_points_for_icp: 600
+
+  # Snapshot validity. Product mode should use complete processed scans.
+  require_full_scan: true
+  min_scan_coverage_deg: 300.0
+  max_snapshot_odom_time_delta: 0.20
+
+  # Coarse-to-fine grid matching.
+  search_translation: 0.8
+  coarse_translation_step: 0.15
+  fine_translation_step: 0.05
+  search_yaw_deg: 35.0
+  coarse_yaw_step_deg: 5.0
+  fine_yaw_step_deg: 1.0
+  fine_top_k: 5
+  score_sigma: 0.10
+  min_unique_matched_cells: 40
+
+  # Fourier-SOFT 2D matching backend.
+  # dimension must be a power of two; values above 64 increase memory/CPU quickly.
+  fourier_dimension: 64
+  fourier_extent: 8.0
+  fourier_draw_sonar_rays: true
+  fourier_use_initial_guess: false
+
+  # Matching thresholds. Scores are defined in docs/engineering_design.md.
+  match_score_threshold: 0.60
+  large_pool_diag_threshold: 20.0
+  large_pool_match_score_threshold: 0.45
+  use_range_adaptive_match_threshold: true
+  short_range_pool_ratio: 0.25
+  medium_range_pool_ratio: 0.40
+  short_range_threshold_relax: 0.08
+  medium_range_threshold_relax: 0.04
+  min_adaptive_match_score_threshold: 0.35
+  enable_polar_profile: true
+  enable_multi_scale_matching: true
+  enable_chamfer_score: true
+  weaken_margin_inside_home_zone: true
+  near_home_margin_relax_radius_ratio: 1.0
+  near_home_score_margin_threshold: -1.0
+  polar_profile_weight: 0.35
+  multi_scale_occupancy_weight: 0.25
+  chamfer_shape_weight: 0.20
+  fs2d_overlap_weight: 0.15
+  fs2d_peak_weight: 0.05
+  score_margin_threshold: 0.08
+  correction_translation_threshold: 0.60
+  correction_yaw_threshold_deg: 35.0
+  enable_icp_refine: false
+
+  # Confirmation. Product requirement: one matched full scan confirms return-home.
+  confirm_window_size: 1
+  confirm_required_hits: 1
+  check_interval: 1.0
+
+  # Resource limits for historical negative descriptors.
+  max_negative_keyframes: 16
+  negative_keyframe_min_distance: 2.0
+  negative_keyframe_min_leave_radius_multiplier: 2.0
+  max_points_per_keyframe: 1200
