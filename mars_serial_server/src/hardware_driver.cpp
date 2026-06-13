@@ -3,6 +3,10 @@
 
 using namespace std;
 using namespace cv;
+
+// [vcu] 简化版 VCU 限幅辅助（文件局部，避免新增 include 依赖；截断/夹限不改符号）
+static inline double vcu_clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static inline int    vcu_clampi(int v, int lo, int hi)         { return v < lo ? lo : (v > hi ? hi : v); }
  
 double pose_xx = 0.0, pose_yy = 0.0;
 HardwareDriver::HardwareDriver(CallbackAsyncSerial *serial)
@@ -139,6 +143,27 @@ void HardwareDriver::rosNode()
     nh_.param("max_acce", motion_params.max_acce, 1.0);
     nh_.param("max_alpha", motion_params.max_alpha, 1.0);
 
+    // ========== [vcu] 简化版 VCU 差速补偿 + /cmd_vel 看门狗 参数 ==========
+    // 默认值刻意=保持现行为：omega_gain=6.4 / track_bias=0 / motor_scale=230
+    //   -> 与旧码逐位等价（cmd_vel->*6.4->*230、不补偿），0613 直线测试锚定参数不受影响。
+    // 改这些参数走 launch / rosparam，现场不需重编。
+    nh_.param("omega_gain",      omega_gain_,      6.4);
+    nh_.param("track_bias",      track_bias_,      0.0);
+    nh_.param("motor_scale",     motor_scale_,     230.0);
+    nh_.param("max_track_speed", max_track_speed_, 1.0);
+    nh_.param("max_motor_cmd",   max_motor_cmd_,   300);
+    nh_.param("cmd_vel_timeout", cmd_vel_timeout_, 0.5);
+    // 安全夹限：track_bias 限到 +-0.15；其余防误设 0/负锁死或失控。
+    if (track_bias_ >  0.15) track_bias_ =  0.15;
+    if (track_bias_ < -0.15) track_bias_ = -0.15;
+    if (max_track_speed_ <= 0.0) max_track_speed_ = 1.0;
+    if (max_motor_cmd_   <= 0)   max_motor_cmd_   = 300;
+    if (cmd_vel_timeout_ <= 0.0) cmd_vel_timeout_ = 0.5;
+    cmd_vel_received_ = false;
+    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v1-20260613）
+    ROS_WARN("[vcu] hardware_driver VCU-v1-20260613 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
+             omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_);
+
     keyboardVel_cmd_sub_ = nh_.subscribe("cmd_vel", 100, &HardwareDriver::sendKeyboardVelCommand, this);
     autoVel_cmd_sub_ = nh_.subscribe("/autoVel_cmd", 100, &HardwareDriver::sendAutoVelCommand, this);
     // imu_data_sub_           = nh_.subscribe("/handsfree/imu",   1000, &HardwareDriver::GrabImuData,             this);
@@ -160,7 +185,7 @@ void HardwareDriver::rosNode()
     ultra_data_pub_ = nh_.advertise<std_msgs::Int32MultiArray>("ultra_data", 1, true);
     // [heading-straight-pd] 附加：发布 IMU 融合航向（度）。纯附加，不改任何现有话题语义。
     imu_heading_pub_ = nh_.advertise<std_msgs::Float32>("imu_heading", 10);
-    // 评审 MEDIUM(Fable5·UB)：advertise 完成后置就绪标志(release)，与 RX 线程的 acquire-load 建立 happens-before，
+    // advertise 完成后置就绪标志(release)，与 RX 线程的 acquire-load 建立 happens-before，
     // 保证 RX 看到标志为真时 imu_heading_pub_ 已完整构造。此后该发布器单次赋值、不再修改，并发只读安全。
     imu_heading_ready_.store(true, std::memory_order_release);
 
@@ -196,6 +221,15 @@ void HardwareDriver::rosNode()
         ros::Duration(0.3),  // 300ms请求一次
         [this](const ros::TimerEvent&) {
             this->sendUltraCommand();
+        }
+    );
+
+    // [vcu] /cmd_vel 看门狗 Timer：与 cmd_vel 回调同走单线程 spinner（天然串行化、sendMessage 不竞态）。
+    //       20Hz 检查；超 cmd_vel_timeout_ 无新指令则持续下发零速（含泵）-> 治“控制器死/Ctrl+C 后续跑”。
+    ros::Timer cmd_watchdog_timer = nh_.createTimer(
+        ros::Duration(0.05),  // 20Hz
+        [this](const ros::TimerEvent&) {
+            this->cmdVelWatchdog();
         }
     );
 
@@ -477,8 +511,8 @@ void HardwareDriver::receiveImuDatas()
     // [heading-straight-pd] 发布融合航向。D-19：本机 roll/yaw 轴互换，真航向=imu_encoder.roll(=imu_roll)，
     // 不是 imu_encoder.yaw。度数原样发，控制器侧做 deg->rad + atan2 wrap。
     // 本发布在串口 RX 线程，advertise 在 rosNode 线程；用 acquire-load 与 advertise 后的 release-store 配对，
-    // 建立 happens-before。仅当就绪标志为真(发布器已完整构造)才发，消除本修复引入的 if(pub_) 竞态读 UB。
-    // (注：驱动既有的跨线程共享态/析构竞态属 D-29 范畴、非本修复引入，不在此处理。)
+    // 建立 happens-before。仅当就绪标志为真(发布器已完整构造)才发，消除发布器竞态读 UB。
+    // (注：驱动既有的跨线程共享态/析构竞态非本次改动引入，不在此处理。)
     std_msgs::Float32 imu_heading_msg;
     imu_heading_msg.data = imu_roll;
     if (imu_heading_ready_.load(std::memory_order_acquire))
@@ -1749,6 +1783,9 @@ void HardwareDriver::receiveWheelDatas()
 
 void HardwareDriver::sendAutoVelCommand(const geometry_msgs::Twist &cmd_vel_msg)
 {
+    // [vcu] 喂看门狗：autoVel 也是电机指令源，刷新时间戳避免看门狗误停 autoVel（本路径其余逻辑本轮不改）
+    last_cmd_vel_time_ = ros::Time::now();
+    cmd_vel_received_  = true;
     geometry_msgs::Twist cmd_vel = cmd_vel_msg;
     if(cmd_vel.linear.x < 0.5 && cmd_vel.linear.x > 0.0){
         cmd_vel.linear.x = 0.5;
@@ -1826,89 +1863,97 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     curr_time = ros::Time::now();
     double dt = (curr_time - las_time).toSec();
     las_time = curr_time;
-    // cout << "dt " << dt << endl;
 
-    double current_speed_command = cmd_vel.linear.x;
-    double current_omega_command = cmd_vel.angular.z * 6.4 ;
+    // [vcu] 喂看门狗：每收到一条 /cmd_vel 刷新时间戳（线程1 spinner，单线程安全）
+    last_cmd_vel_time_ = curr_time;
+    cmd_vel_received_  = true;
 
-    // cout << "keybot dt " << dt << endl;
-    // cout << "cmd_vel.linear.x = " << cmd_vel.linear.x << endl;
-    // cout << "base_twist_state.linear.x = " << base_twist_state.linear.x << endl;
+    // 1. 上层速度命令；转向增益由写死 6.4 改为可调 omega_gain_（默认 6.4，保持历史标定）
+    const double v = cmd_vel.linear.x;
+    const double w = cmd_vel.angular.z * omega_gain_;
 
-    // cout << "current_omega_command = " << current_omega_command << endl;
-    // cout << "base_twist_state.angular.z = " << base_twist_state.angular.z << endl;
+    // 2. 差速分解
+    const double half_track = machine_params.wheel_spacing / 2.0;
+    double right_speed = v + w * half_track;
+    double left_speed  = v - w * half_track;
 
-    // speed_receive = current_speed_command;
-    // omega_receive = current_omega_command;
+    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0 -> 不补偿）
+    //    track_bias>0：右减左增（治“总向左偏”）；<0 反之。
+    right_speed *= (1.0 - track_bias_);
+    left_speed  *= (1.0 + track_bias_);
 
-    double right_speed = current_speed_command + current_omega_command * machine_params.wheel_spacing / 2;
-    double left_speed = current_speed_command - current_omega_command * machine_params.wheel_spacing / 2;
+    // 4. 方向标志（喂里程计）：用补偿后的速度符号，与实际下发命令一致；|bias|<=0.15 不翻号。
+    flagdirR = (right_speed >= 0) ? 1 : -1;
+    flagdirL = (left_speed  >= 0) ? 1 : -1;
 
-    
-    if(right_speed >= 0){
-        flagdirR = 1;
-    }else{
-        flagdirR = -1;
-    }
+    // 5. 履带目标速度限幅（默认 max_track_speed_=1.0；实测最坏正常峰值 ~0.65-0.82 m/s，仅兜失控、正常不触发）
+    right_speed = vcu_clampd(right_speed, -max_track_speed_, max_track_speed_);
+    left_speed  = vcu_clampd(left_speed,  -max_track_speed_, max_track_speed_);
 
-    if(left_speed >= 0){
-        flagdirL = 1;
-    }else{
-        flagdirL = -1;
-    }
-    // cout << "current_speed_command " << current_speed_command << endl;
-    // cout << "current_omega_command" << current_omega_command << endl;
-    // cout << "right_speed " << right_speed << endl;
-    // cout << "left_speed " << left_speed << endl;
+    // 6. 转电机命令：230 -> 可调 motor_scale_；左轮取负（与旧码一致）。
+    //    (int) 截断向零，与旧 `motor_command.right_speed = double` 的隐式 double->int 转换等价 -> 默认参数逐位相同。
+    //    max_motor_cmd_ 是最终电机命令上限：默认 300 下、轨速限幅(1.0×230=230)先于它触发，故它是
+    //    motor_scale_ 被人为调高(调试)时的兜底；MCU 真实安全上限待现场/固件确认(见 OPEN_ITEMS)。
+    int right_cmd = vcu_clampi((int)( right_speed * motor_scale_), -max_motor_cmd_, max_motor_cmd_);
+    int left_cmd  = vcu_clampi((int)(-left_speed  * motor_scale_), -max_motor_cmd_, max_motor_cmd_);
 
-    motor_command.right_speed = right_speed * 230; //-left_speed * 230;
-    motor_command.left_speed = -left_speed * 230; //right_speed * 230;
-    // motor_command.spin_speed = fabs((current_speed_command)*150) + fabs((current_omega_command)*50);
-    // if(fabs(current_speed_command) == 0) {
-        // motor_command.spinl_speed = fabs((current_speed_command)*240);
-        // motor_command.spinr_speed = fabs((current_speed_command)*260);
-    // }else{
-    //     motor_command.spin_speed = 90;
-    // }
-    // cout << "motor_command.spinl_speed  " << motor_command.spinl_speed  << endl;
-    // if(motor_command.spinl_speed > 90){
-    //     motor_command.spinl_speed = 90;
-    // }
+    motor_command.right_speed = right_cmd;
+    motor_command.left_speed  = left_cmd;
+
+    // 7. 水泵：cmd_vel.linear.y in [0,1] -> spin [0,90]（保持原逻辑；打印改 ASCII）
     motor_command.spinl_speed = 0;
     motor_command.spinr_speed = 0;
-    // cout << "cmd_vel.linear.y " << cmd_vel.linear.y << endl;
-
-   
-
     double pump_speed = cmd_vel.linear.y;
-    
     if (pump_speed > 0.01) {
         motor_command.spinl_speed = (int)(pump_speed * 90.0);
         motor_command.spinr_speed = (int)(pump_speed * 90.0);
-        
-        if(motor_command.spinl_speed > 90) motor_command.spinl_speed = 90;
-        if(motor_command.spinr_speed > 90) motor_command.spinr_speed = 90;
-        
+        if (motor_command.spinl_speed > 90) motor_command.spinl_speed = 90;
+        if (motor_command.spinr_speed > 90) motor_command.spinr_speed = 90;
         static int log_count = 0;
         if (log_count++ % 50 == 0) {
-            ROS_INFO("水泵开启: %.0f%%", pump_speed * 100);
+            ROS_INFO("[vcu] pump on: %.0f%%", pump_speed * 100);
         }
     }
 
-    // cout << " " << endl;
-    // cout << "motor_command.right_speed = " << motor_command.right_speed << endl;
-    // cout << "motor_command.left_speed = " << motor_command.left_speed << endl;
-    // cout << "motor_command.spin_speed = " << motor_command.spin_speed << endl;
-    // cout << "dis = " << dis << endl;
-    // cout << "------------" << endl;
-
-    // ========== 新增：通过 cmd_vel.linear.y 控制水泵 ==========
-    // linear.y 范围 0.0 ~ 1.0，对应水泵速度 0 ~ 90
-   
-    
     MSG_Type send_type = CM_DEV_CTL_TYPE;
     int send_id = RCRID_MOTOR_COMMUN;
     sendMessage(send_type, send_id, (uint8_t *)&motor_command, (uint8_t)sizeof(motor_command));
+}
+
+// [vcu] 统一停车帧：左右电机 + 水泵全部置零。仅在线程1（看门狗 Timer / 关停 join 后）调用，单线程安全。
+void HardwareDriver::sendStopCommand()
+{
+    motor_command.right_speed = 0;
+    motor_command.left_speed  = 0;
+    motor_command.spinl_speed = 0;
+    motor_command.spinr_speed = 0;
+    MSG_Type send_type = CM_DEV_CTL_TYPE;
+    int send_id = RCRID_MOTOR_COMMUN;
+    sendMessage(send_type, send_id, (uint8_t *)&motor_command, (uint8_t)sizeof(motor_command));
+}
+
+// [vcu] /cmd_vel 看门狗回调（20Hz，spinner 线程）：超时无新指令则下发零速。
+// 从未收到过指令时不主动发帧（避免开机/idle 抢串口）；autoVel 也刷新时间戳故不会误停 autoVel。
+// 边沿触发——进入超时态立即停一次 + 之后 ~5Hz 持续重申(幂等、防丢帧)，而非每拍 20Hz 灌帧；
+//   正常 idle 待命不再被持续高频干预。
+// ⚠ 安全边界：本看门狗只在 PC 端发"速度=0"帧；"零帧=真停车"取决于 MCU 行为、未经现场证实，
+//   不消除失控风险，须现场实测(杀控制器→看是否真停+录像)，唯一可靠停车仍是断电。
+void HardwareDriver::cmdVelWatchdog()
+{
+    if (!cmd_vel_received_) return;
+    double age = (ros::Time::now() - last_cmd_vel_time_).toSec();
+    if (age > cmd_vel_timeout_) {
+        if (!wd_timed_out_ || (++wd_tick_ % 4 == 0)) {   // 进入即停 + 之后 20Hz/4≈5Hz 重申
+            sendStopCommand();
+        }
+        if (!wd_timed_out_) {
+            wd_timed_out_ = true;
+            ROS_WARN("[vcu] cmd_vel watchdog: no cmd for %.2fs, motors+pump stopped (re-assert ~5Hz)", age);
+        }
+    } else {
+        wd_timed_out_ = false;
+        wd_tick_ = 0;
+    }
 }
 
 void HardwareDriver::sendUltraCommand(){

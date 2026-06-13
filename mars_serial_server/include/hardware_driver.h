@@ -190,6 +190,7 @@ public:
     void sendAutoChargeCommand();
     void sendTestVelCommand();
     void sendUltraCommand();
+    void sendStopCommand();        // [vcu] 统一停车帧（关停时由 main 调用 + 看门狗调用），公有故 serial_starup 可访问
 
     void receiveInfDatas();
     
@@ -207,6 +208,7 @@ private:
     
     void sendKeyboardVelCommand(const geometry_msgs::Twist& cmd_vel);
     void sendAutoVelCommand(const geometry_msgs::Twist &auto_vel_cmdmsg);
+    void cmdVelWatchdog();         // [vcu] /cmd_vel 看门狗回调（私有，仅内部 Timer 调用）
 
     double speedSmooth(double  expected_speed,  double used_acce);
     double omegaSmooth(double  expected_omega,  double used_alpha);
@@ -251,6 +253,18 @@ private:
     mars_msgs::DeviceOnoff  deviceOnoff_sta;
 
     MotorCommand            motor_command;
+
+    // ========== [vcu] 简化版 VCU 差速补偿 + 看门狗 参数/状态（默认值=保持现行为）==========
+    double                  omega_gain_       = 6.4;    // 替代写死 6.4
+    double                  track_bias_       = 0.0;    // 左右履带静态偏置补偿，夹到 [-0.15, +0.15]
+    double                  motor_scale_      = 230.0;  // 替代写死 230
+    double                  max_track_speed_  = 1.0;    // 履带目标速度限幅(m/s)，仅兜失控
+    int                     max_motor_cmd_    = 300;    // 电机命令限幅，仅兜失控
+    double                  cmd_vel_timeout_  = 0.5;    // /cmd_vel 看门狗超时(s)
+    ros::Time               last_cmd_vel_time_;         // 最近一次 cmd_vel 到达时刻
+    bool                    cmd_vel_received_ = false;  // 是否已收到过任何 cmd_vel
+    bool                    wd_timed_out_     = false;  // 看门狗是否已进入超时态(边沿触发用)
+    int                     wd_tick_          = 0;      // 看门狗重申节流计数(20Hz/4≈5Hz)
 
     ros::NodeHandle         nh_;
     Emath                   emath;
@@ -349,7 +363,7 @@ private:
     ros::Publisher      infrared_data_pub_;
     ros::Publisher      ultra_data_pub_;
     ros::Publisher      imu_heading_pub_;   // [heading-straight-pd] 融合航向 /imu_heading (std_msgs/Float32, 度)
-    // 评审 MEDIUM(Fable5·UB)：advertise 在 rosNode 线程、首帧 publish 在串口 RX 线程，无 happens-before；
+    // advertise 在 rosNode 线程、首帧 publish 在串口 RX 线程，无 happens-before；
     // 原 if(imu_heading_pub_) guard 是对 ros::Publisher 内部 shared_ptr 的竞态读=C++11 UB。
     // 用 atomic 标志 + release/acquire 建立同步：advertise 完成后 store(true,release)，RX 侧 load(acquire) 为真才发。
     std::atomic<bool>   imu_heading_ready_{false};

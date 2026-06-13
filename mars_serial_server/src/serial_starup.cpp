@@ -128,7 +128,14 @@ int main(int argc, char** argv)
           r.sleep();
         }
         quit:
-            serial.close();  
+            // [vcu] 关停停车：先 join rosNode 线程(确保线程1 不再写串口)，再单线程下发停车帧，最后关串口 —— 无并发竞态。
+            //  ⚠ AsyncSerial::write() 是 boost-asio 异步(入队+io.post，立即返回)；close() 会停 io_service+关端口，
+            //    会在异步写真正上线前关掉串口 → 停车帧丢失。故 sendStop 后先睡一小会儿让其真正发出
+            //    (13 字节 @115200 ≈1.1ms，睡 100ms = ~90× 余量；仅关停路径，运行期看门狗写不受影响)。
+            motioncontroller_thread.join();
+            hardware_driver.sendStopCommand();
+            ros::Duration(0.1).sleep();   // 等异步串口写真正发出后再 close
+            serial.close();
     }
     catch (std::exception& e)
     {
