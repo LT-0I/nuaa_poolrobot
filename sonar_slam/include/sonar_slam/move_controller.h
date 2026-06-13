@@ -17,7 +17,8 @@
 #include <chrono>       
 #include <iomanip>      
 #include <unistd.h>
- #include <deque>
+#include <cstdint>
+#include <deque>
 
 namespace sonar_slam {
 
@@ -163,7 +164,7 @@ private:
  
     float config_speed_;      // 配置的行走速度
     float config_pump_speed_; // 配置的水泵速度
-    float config_wall_align_;   // 沿边对齐距离 (保留备用)
+    float config_wall_align_;   // 目标距右墙距离(m)，沿墙距离环用
     float user_config_pump_speed_;  // 用户命令行配置的水泵速度
     // 控制参数
     float linear_tolerance_;  // 位置容差
@@ -194,6 +195,13 @@ private:
     float movingAverageFilter(float new_value, std::deque<float>& buffer, int window_size = 3);
 
     bool rotateToTargetAngle(float target_angle_deg, float timeout = 8.0f);
+
+    // 右侧超声"新鲜度"跟踪：每通道真实 ~0.83Hz，原始值变化即视为收到新帧
+    // (修复拐角在 20Hz 循环里反复读 0.83Hz 旧值导致提前停的根因)
+    uint32_t ultra_right_seq_;     // 右侧任一通道原始值变化时自增
+    ros::Time ultra_right_stamp_;  // 右侧最近一次值变化时间(陈旧看门狗用)
+    int last_ultra_raw_rf_;        // 上次原始 data[2]
+    int last_ultra_raw_rr_;        // 上次原始 data[3]
 
 };
 } // namespace sonar_slam

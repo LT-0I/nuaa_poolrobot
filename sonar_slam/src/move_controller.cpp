@@ -22,7 +22,10 @@ MoveController::MoveController() :
     config_speed_(0.25f),
     config_pump_speed_(0.0f),           
     user_config_pump_speed_(0.0f),      
-    config_wall_align_(1.0f)
+    config_wall_align_(2.0f),
+    ultra_right_seq_(0),
+    last_ultra_raw_rf_(-1),
+    last_ultra_raw_rr_(-1)
 {
     ROS_INFO("=== MoveController 初始化开始 ===");
     
@@ -65,7 +68,7 @@ MoveController::MoveController() :
     float temp_pump = 0.0f;
     nh_.param("pump_speed", temp_pump, 0.1f);
     user_config_pump_speed_ = 0.4f;
-    nh_.param("wall_align", config_wall_align_, 1.0f);
+    nh_.param("wall_align", config_wall_align_, 2.0f);  // 目标距墙距离(m)，沿墙距离环用
     config_pump_speed_ = 0.0f;
 
     ROS_INFO("========================================");
@@ -1019,23 +1022,37 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                     ROS_INFO("左转至右侧平行于池壁");
                     float turn_start = current_pose_.theta;
                     ros::Time turn_start_time = ros::Time::now();
-                    bool parallel_check_enabled = false;
-                    
+                    // 拐角左转：odom 粗转(快、相对角准) + "新鲜"右侧超声平行精修(stop-and-settle)
+                    // 修复②：旧码在 20Hz 循环反复读 0.83Hz 旧值→提前停→没转够→机头朝墙
+                    const float COARSE_DEG = 80.0f;          // 开环粗转到此角度(odom)
+                    const float CAP_DEG = 95.0f;             // 角度兜底上限
+                    const float TURN_PARALLEL_TOL = 0.025f;  // 平行容差(m)
+                    const int   PARALLEL_CONFIRM_NEEDED = 2; // 连续N个"新鲜"帧确认平行
+                    const float FINE_ANGULAR = 0.10f;        // 精修脉冲角速度(cmd,实际×6.4)
+                    const float FINE_PULSE_SEC = 0.15f;      // 单次脉冲时长(限制单次旋转~5°)
+                    int parallel_confirm = 0;
+                    uint32_t last_ultra_seq;
+                    { std::lock_guard<std::mutex> lk(sensor_mutex_); last_ultra_seq = ultra_right_seq_; }
+                    bool phaseB_entered = false;       // 进入精修阶段标志
+                    ros::Time last_fresh_time;         // 阶段B最近一次新帧时间(无回波兜底用)
+
                     while (ros::ok()) {
                         ros::spinOnce();
                         updateCurrentPose();
-                        
+
                         float yaw_change = current_pose_.theta - turn_start;
                         if (yaw_change > M_PI) yaw_change -= 2 * M_PI;
+                        if (yaw_change < -M_PI) yaw_change += 2 * M_PI;
                         float abs_yaw = fabs(yaw_change);
-                        
+
                         if ((ros::Time::now() - turn_start_time).toSec() > 8.0f) {
                             stop();
-                            ROS_WARN("旋转超时，强制停止");
+                            ROS_WARN("旋转超时，强制停止 (转过%.1f°)", abs_yaw * RAD_TO_DEG);
                             break;
                         }
-                        
-                        if (abs_yaw < 70.0f * DEG_TO_RAD) {
+
+                        // 阶段A：开环粗转到 COARSE_DEG(odom 相对角，快)
+                        if (abs_yaw < COARSE_DEG * DEG_TO_RAD) {
                             geometry_msgs::Twist cmd;
                             cmd.linear.x = 0.0f;
                             cmd.linear.y = pump_speed;
@@ -1044,52 +1061,101 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                             ros::Duration(0.05).sleep();
                             continue;
                         }
-                        
-                        if (!parallel_check_enabled) {
-                            parallel_check_enabled = true;
-                            ROS_INFO("已转60°，启用平行度检测");
+
+                        // 角度兜底：精修拿不到有效回波时防空转
+                        if (abs_yaw > CAP_DEG * DEG_TO_RAD) {
+                            stop();
+                            ROS_WARN("兜底：累积转到%.0f°停止", abs_yaw * RAD_TO_DEG);
+                            break;
                         }
-                        
-                        // 使用修正后的右侧传感器数据
-                        float front = wall_sensors_.ultra_right_front;
-                        float rear = wall_sensors_.ultra_right_rear;
-                        
-                        bool data_valid = (front > 0.05f && front < 5.0f && 
+
+                        // 进入阶段B：标记起点(用于"长时间无新帧"兜底计时)
+                        if (!phaseB_entered) { phaseB_entered = true; last_fresh_time = ros::Time::now(); }
+
+                        // 阶段B：只用"新鲜"右侧超声精修(seq 未推进则原地保持等新帧)
+                        uint32_t seq; float front, rear;
+                        {
+                            std::lock_guard<std::mutex> lk(sensor_mutex_);
+                            seq = ultra_right_seq_;
+                            front = wall_sensors_.ultra_right_front;
+                            rear  = wall_sensors_.ultra_right_rear;
+                        }
+                        if (seq == last_ultra_seq) {
+                            // 长时间无新帧(超声疑似无回波)：慢速开环补转，由 CAP_DEG 收口退出，避免空等到8s
+                            if ((ros::Time::now() - last_fresh_time).toSec() > 2.5f) {
+                                geometry_msgs::Twist cmd;
+                                cmd.linear.x = 0.0f;
+                                cmd.linear.y = pump_speed;
+                                cmd.angular.z = 0.12f;
+                                cmd_vel_pub_.publish(cmd);
+                                ros::Duration(0.05).sleep();
+                                continue;
+                            }
+                            geometry_msgs::Twist hold;
+                            hold.linear.x = 0.0f;
+                            hold.linear.y = pump_speed;
+                            hold.angular.z = 0.0f;
+                            cmd_vel_pub_.publish(hold);
+                            ros::Duration(0.05).sleep();
+                            continue;
+                        }
+                        last_ultra_seq = seq;  // 收到新帧
+                        last_fresh_time = ros::Time::now();
+
+                        bool data_valid = (front > 0.05f && front < 5.0f &&
                                            rear > 0.05f && rear < 5.0f);
-                        
-                        if (data_valid) {
-                            float parallel_error = rear - front;
-                            
-                            ROS_INFO_THROTTLE(0.3, "旋转对齐: 前=%.2f 后=%.2f 误差=%.2f 角度=%.1f°", 
-                                            front, rear, parallel_error, abs_yaw * RAD_TO_DEG);
-                            
-                            if (fabs(parallel_error) < 0.025f) {  // 放宽容差
-                                stop();
-                                ROS_INFO("平行度达标，停止旋转 (转过%.1f°)", abs_yaw * RAD_TO_DEG);
-                                break;
-                            }
-                            
-                            float angular_speed = (fabs(parallel_error) < 0.1f) ? 0.08f : 0.12f;
+                        if (!data_valid) {
+                            // 新帧但无回波：补一点开环转，交给角度兜底收口
+                            parallel_confirm = 0;
                             geometry_msgs::Twist cmd;
                             cmd.linear.x = 0.0f;
                             cmd.linear.y = pump_speed;
-                            cmd.angular.z = angular_speed;
-                            cmd_vel_pub_.publish(cmd);
-                        } else {
-                            if (abs_yaw > 88.0f * DEG_TO_RAD) {
-                                stop();
-                                ROS_WARN("兜底：累积转到88°停止");
-                                break;
+                            cmd.angular.z = FINE_ANGULAR;
+                            ros::Time t0 = ros::Time::now();
+                            while ((ros::Time::now() - t0).toSec() < FINE_PULSE_SEC && ros::ok()) {
+                                cmd_vel_pub_.publish(cmd);
+                                ros::spinOnce();
+                                ros::Duration(0.05).sleep();
                             }
-                            
-                            geometry_msgs::Twist cmd;
-                            cmd.linear.x = 0.0f;
-                            cmd.linear.y = pump_speed;
-                            cmd.angular.z = 0.12f;
-                            cmd_vel_pub_.publish(cmd);
+                            stop();
+                            continue;
                         }
-                        
-                        ros::Duration(0.05).sleep();
+
+                        float parallel_error = rear - front;  // >0:机头朝右墙(欠转)
+                        ROS_INFO("旋转精修(新鲜帧): 前=%.2f 后=%.2f 误差=%.3f 角度=%.1f°",
+                                 front, rear, parallel_error, abs_yaw * RAD_TO_DEG);
+
+                        if (fabs(parallel_error) < TURN_PARALLEL_TOL) {
+                            parallel_confirm++;
+                            if (parallel_confirm >= PARALLEL_CONFIRM_NEEDED) {
+                                stop();
+                                ROS_INFO("平行达标(连续%d帧新鲜确认)，停止旋转 (转过%.1f°)",
+                                         parallel_confirm, abs_yaw * RAD_TO_DEG);
+                                break;
+                            }
+                            geometry_msgs::Twist hold;
+                            hold.linear.x = 0.0f;
+                            hold.linear.y = pump_speed;
+                            hold.angular.z = 0.0f;
+                            cmd_vel_pub_.publish(hold);
+                            ros::Duration(0.05).sleep();
+                            continue;
+                        }
+
+                        // 未平行：朝减小误差方向发限时脉冲，再回到"停-等新帧"
+                        parallel_confirm = 0;
+                        float w = (parallel_error > 0) ? FINE_ANGULAR : -FINE_ANGULAR;
+                        geometry_msgs::Twist cmd;
+                        cmd.linear.x = 0.0f;
+                        cmd.linear.y = pump_speed;
+                        cmd.angular.z = w;
+                        ros::Time t0 = ros::Time::now();
+                        while ((ros::Time::now() - t0).toSec() < FINE_PULSE_SEC && ros::ok()) {
+                            cmd_vel_pub_.publish(cmd);
+                            ros::spinOnce();
+                            ros::Duration(0.05).sleep();
+                        }
+                        stop();
                     }
                     
                     ros::Duration(0.3).sleep();
@@ -1153,116 +1219,67 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             ROS_INFO("快到目的地，水泵已关闭");
         }
         
-        // ==================== 角度纠偏 ====================
-        float relative_theta = total_yaw_change;  // odom 累积偏角
-        
+        // ==================== 沿墙纠偏：距墙距离环 + 平行环(超声为主、odom兜底) ====================
+        // 修复①：引入"距墙距离"控制环(config_wall_align_=目标距,默认2m)，给横向位置回正力
+        // 修复②③：不再把拐弯后 odom 当"直"的零基准；超声有效时持续把 odom 参考归零，
+        //          odom 仅在丢墙时短时兜底保航向
+        float relative_theta = total_yaw_change;  // 仅用于丢墙兜底/日志
+
         if (!correction_enabled && (ros::Time::now() - correction_start_time).toSec() > 2.0) {
             correction_enabled = true;
-            ROS_WARN("启动连续按键纠偏, 当前累积偏角=%.1f°", relative_theta * RAD_TO_DEG);
+            ROS_WARN("启动沿墙纠偏");
         }
-        
-        // ==================== 角度纠偏（双传感器验证）====================
+
         if (correction_enabled && !wall_avoiding) {
-         
-            float odom_abs = fabs(relative_theta);
-            
-            // 获取右侧超声波平行度
-            float front = wall_sensors_.ultra_right_front;
-            float rear = wall_sensors_.ultra_right_rear;
+            // 增益为 cmd 单位，实际角速度 = cmd ×6.4 (见驱动 hardware_driver.cpp)；需现场按日志整定
+            const float K_DIST = 0.03f;        // 距墙误差→角速度 (cmd/m) 经离线扫参:0.83Hz超声下稳定收敛
+            const float K_PAR  = 0.30f;        // 平行误差→角速度 (cmd/m)
+            const float MAX_CORR = 0.08f;      // 沿墙纠偏限幅 (cmd; ×6.4≈0.51 rad/s)
+            const float K_ODOM_HOLD = 1.0f;    // 丢墙时 odom 保航向增益 (cmd/rad)
+            const float MAX_ODOM_CORR = 0.10f;
+            const float STALE_SEC = 3.0f;      // 右侧超声陈旧看门狗(s)
+
+            // 快照右侧超声(加锁，修复原裸读竞态) + 新鲜度
+            float front, rear; ros::Time ultra_stamp;
+            {
+                std::lock_guard<std::mutex> lk(sensor_mutex_);
+                front = wall_sensors_.ultra_right_front;
+                rear  = wall_sensors_.ultra_right_rear;
+                ultra_stamp = ultra_right_stamp_;
+            }
             bool front_valid = (front > 0.05f && front < 5.0f);
-            bool rear_valid = (rear > 0.05f && rear < 5.0f);
-            
-            float parallel_error = 0.0f;
-            bool parallel_valid = false;
-            
-            if (front_valid && rear_valid) {
-                parallel_error = rear - front;  // 正值表示后远前近
-                parallel_valid = true;
-            }
-            
-            // ========== 双传感器验证 ==========
-            float confidence = 0.0f;      // 纠偏置信度
-            bool need_correction = false;
-            float desired_correction = 0.0f;
-            
-           // 1. odom 判断偏航方向（修正）
-            bool odom_left = (relative_theta > 0.02f);    // 正角度 = 左偏
-            bool odom_right = (relative_theta < -0.02f);  // 负角度 = 右偏
+            bool rear_valid  = (rear  > 0.05f && rear  < 5.0f);
+            bool fresh = (!ultra_stamp.isZero() &&
+                          (ros::Time::now() - ultra_stamp).toSec() < STALE_SEC);
 
-
-            // 2. 超声波判断偏航方向
-            bool ultra_left = false;   // 超声波显示左偏
-            bool ultra_right = false;  // 超声波显示右偏
-
-            if (parallel_valid) {
-                // parallel_error > 0 (后远前近) → 机头朝右 → 向右偏
-                // parallel_error < 0 (后近前远) → 机头朝左 → 向左偏
-                ultra_right = (parallel_error > 0.015f);   // 向右偏
-                ultra_left = (parallel_error < -0.015f);   // 向左偏
-            }
-
-            // ========== 双传感器验证逻辑 ==========
-            if (odom_left && ultra_left) {
-                // 左偏 → 需要右转（负角速度）
-                need_correction = true;
-                desired_correction = -std::min(0.35f, relative_theta * 2.0f);  // 注意：relative_theta 现在是正的
-                confidence = 1.0f;
-                ROS_INFO_THROTTLE(1.0, "✅ 双传感器一致: 左偏 (odom=%.1f°, ultra=%.2fm)", 
-                                relative_theta * RAD_TO_DEG, parallel_error);
-            }
-            else if (odom_right && ultra_right) {
-                // 右偏 → 需要左转（正角速度）
-                need_correction = true;
-                desired_correction = std::min(0.35f, -relative_theta * 2.0f);
-                confidence = 1.0f;
-                ROS_INFO_THROTTLE(1.0, "✅ 双传感器一致: 右偏 (odom=%.1f°, ultra=%.2fm)", 
-                                -relative_theta * RAD_TO_DEG, parallel_error);
-            }
-            else if (odom_left || odom_right) {
-                need_correction = true;
-                confidence = 0.8f;
-                if (odom_left) {  // 左偏
-                    desired_correction = -std::min(0.30f, relative_theta * 1.5f);
-                } else {  // 右偏
-                    desired_correction = std::min(0.30f, -relative_theta * 1.5f);
-                }
-                ROS_WARN_THROTTLE(1.0, "⚠️ 单传感器(odom): 偏角=%.1f°", 
-                                fabs(relative_theta) * RAD_TO_DEG);
-            }
-            else if (parallel_valid && (ultra_left || ultra_right)) {
-                // 只有超声波有效，odom 无偏角 → 可能是传感器漂移，轻微修正
-                need_correction = true;
-                confidence = 0.3f;
-                if (ultra_left) {
-                    desired_correction = -0.08f;
-                } else {
-                    desired_correction = 0.08f;
-                }
-                ROS_WARN_THROTTLE(1.0, "⚠️ 单传感器(ultra): 平行误差=%.2fm", parallel_error);
-            }
-            
-            // ========== 应用纠偏 ==========
-            if (need_correction) {
-                // 基础补偿（抵抗机械左偏）
-                float base_compensation = 0.0f;   
-                
-                // 根据置信度调整纠偏力度
-                current_angular_correction = desired_correction * confidence + base_compensation;
-                
-                // 限幅
-                current_angular_correction = std::max(-0.30f, std::min(0.30f, current_angular_correction));
-                
-                ROS_INFO_THROTTLE(0.5, "纠偏输出: 角速度=%.2f (置信度=%.0f%%)", 
-                                current_angular_correction, confidence * 100);
+            float angular_cmd = 0.0f;
+            if (front_valid && rear_valid && fresh) {
+                // —— 超声为主：距墙距离环 + 平行环 ——
+                float d = 0.5f * (front + rear);            // 距右墙
+                float e_par = rear - front;                 // >0:机头朝墙
+                float e_dist = config_wall_align_ - d;      // >0:离墙太近
+                angular_cmd = K_DIST * e_dist + K_PAR * e_par;  // 太近/朝墙→左转(+)远离
+                angular_cmd = std::max(-MAX_CORR, std::min(MAX_CORR, angular_cmd));
+                // 超声有效→归零 odom 参考：丢墙兜底时保持的是当前(超声建立的)航向，而非拐弯遗留错航向
+                total_yaw_change = 0.0f;
+                last_theta = current_pose_.theta;
+                ROS_INFO_THROTTLE(1.0, "沿墙: d=%.2f(目标%.2f) e_par=%.3f -> w=%.3f",
+                                  d, config_wall_align_, e_par, angular_cmd);
+            } else if (front_valid != rear_valid) {
+                // —— 仅一侧有墙：按既有约定轻纠以重捕获 ——
+                angular_cmd = rear_valid ? -0.05f : 0.05f;  // 右前丢→右转(-); 右后丢→左转(+)
+                // 仍贴墙：刷新 odom 基准，保证后续丢墙兜底以当前航向为零点
+                total_yaw_change = 0.0f;
+                last_theta = current_pose_.theta;
+                ROS_WARN_THROTTLE(1.0, "单侧超声(前%.2f/后%.2f)，轻纠 w=%.3f", front, rear, angular_cmd);
             } else {
-                // 无偏航，只保持基础补偿
-                current_angular_correction =  0.0f;
+                // —— 两侧无效/陈旧：odom 短时兜底保航向 ——
+                angular_cmd = -K_ODOM_HOLD * relative_theta;
+                angular_cmd = std::max(-MAX_ODOM_CORR, std::min(MAX_ODOM_CORR, angular_cmd));
+                ROS_WARN_THROTTLE(1.0, "右侧超声无效/陈旧，odom兜底 偏角=%.1f° w=%.3f",
+                                  relative_theta * RAD_TO_DEG, angular_cmd);
             }
-        }
-        
-        // 小角度时逐渐减小角速度，避免过冲
-        if (fabs(relative_theta) < 0.05f && fabs(current_angular_correction) > 0.05f) {
-            current_angular_correction *= 0.5f;
+            current_angular_correction = angular_cmd;
         }
         
         // ========== 发送移动命令 ==========
@@ -1718,6 +1735,16 @@ void MoveController::ultraCallback(const std_msgs::Int32MultiArray::ConstPtr& ms
     std::lock_guard<std::mutex> lock(sensor_mutex_);
     
     if (msg->data.size() >= 4) {
+        // 新鲜度：右侧任一原始值变化即视为收到新帧(每通道真实 ~0.83Hz)
+        int raw_rf = msg->data[2];
+        int raw_rr = msg->data[3];
+        if (raw_rf != last_ultra_raw_rf_ || raw_rr != last_ultra_raw_rr_) {
+            ultra_right_seq_++;
+            ultra_right_stamp_ = ros::Time::now();
+            last_ultra_raw_rf_ = raw_rf;
+            last_ultra_raw_rr_ = raw_rr;
+        }
+
         wall_sensors_.infra_front_left = msg->data[0] / 1000.0f;   // 前左超声波
         wall_sensors_.infra_front_right = msg->data[1] / 1000.0f;  // 前右超声波
         wall_sensors_.ultra_right_front = msg->data[2] / 1000.0f;  // 右前超声波
