@@ -165,6 +165,7 @@ private:
     float config_speed_;      // 配置的行走速度
     float config_pump_speed_; // 配置的水泵速度
     float config_wall_align_;   // 目标距右墙距离(m)，沿墙距离环用
+    float config_wall_stale_sec_;  // 右侧超声陈旧看门狗(s)，超此时长无新鲜帧→退 odom 兜底；须≥右侧刷新周期，随驱动 ultra_poll_period 调
     float user_config_pump_speed_;  // 用户命令行配置的水泵速度
     // 控制参数
     float linear_tolerance_;  // 位置容差

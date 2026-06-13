@@ -23,6 +23,7 @@ MoveController::MoveController() :
     config_pump_speed_(0.0f),           
     user_config_pump_speed_(0.0f),      
     config_wall_align_(2.0f),
+    config_wall_stale_sec_(1.5f),
     ultra_right_seq_(0),
     last_ultra_raw_rf_(-1),
     last_ultra_raw_rr_(-1)
@@ -69,6 +70,12 @@ MoveController::MoveController() :
     nh_.param("pump_speed", temp_pump, 0.1f);
     user_config_pump_speed_ = 0.4f;
     nh_.param("wall_align", config_wall_align_, 2.0f);  // 目标距墙距离(m)，沿墙距离环用
+    // 右侧超声陈旧看门狗(s)：默认1.5(配 D-41 驱动右侧~0.3s/路、≈5×周期)；夹在[0.5,5.0]防误设。
+    // 下限0.5≥3×最快右侧刷新周期(驱动 ultra_poll_period 最小0.05→右0.15s)，留抖动裕度。
+    // ⚠ 须≥右侧实际刷新周期：若驱动 ultra_poll_period 调大或回退旧1.2s/路，须同步上调本值，否则超声环↔odom兜底抖动。
+    nh_.param("wall_stale_sec", config_wall_stale_sec_, 1.5f);
+    if (config_wall_stale_sec_ < 0.5f) config_wall_stale_sec_ = 0.5f;
+    if (config_wall_stale_sec_ > 5.0f) config_wall_stale_sec_ = 5.0f;
     config_pump_speed_ = 0.0f;
 
     ROS_INFO("========================================");
@@ -78,6 +85,7 @@ MoveController::MoveController() :
     ROS_INFO("  config_pump_speed = %.2f (实际输出，行走时才生效)", config_pump_speed_);
     ROS_INFO("  temp_pump = %.2f (用户实际设置)", temp_pump);
     ROS_INFO("  wall_align = %.2f m", config_wall_align_);
+    ROS_INFO("  wall_stale_sec = %.2f s (right ultra staleness watchdog)", config_wall_stale_sec_);
     ROS_INFO("========================================");
  
     
@@ -1237,11 +1245,9 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             const float MAX_CORR = 0.08f;      // 沿墙纠偏限幅 (cmd; ×6.4≈0.51 rad/s)
             const float K_ODOM_HOLD = 1.0f;    // 丢墙时 odom 保航向增益 (cmd/rad)
             const float MAX_ODOM_CORR = 0.10f;
-            const float STALE_SEC = 1.5f;      // 右侧超声陈旧看门狗(s)：D-41 把右侧刷新提到 ~3.3Hz(0.3s/路)后，
-                                               // 1.5s≈5×刷新周期，既留漏帧/值不变的裕度，又把丢回波时的盲走距离
-                                               // 从 ~1m(旧3s)压到 ~0.5m(0.35m/s)。早先 3.0 是按旧 0.83Hz(1.2s/路)定的、现已过松。
-                                               // ⚠ 依赖 D-41 驱动(ultra_poll_period≤0.1s→右0.3s/路)：若驱动回退到旧 1.2s/路、
-                                               //   或把 ultra_poll_period 调到 ~0.5s，1.5s 裕度不足会在超声环↔odom兜底间抖动，须同步上调本值
+            const float STALE_SEC = config_wall_stale_sec_;  // 右侧超声陈旧看门狗(s)，ROS 参数 wall_stale_sec(默认1.5、夹[0.5,5.0])。
+                                               // 默认 1.5 配 D-41 驱动右侧 ~3.3Hz(0.3s/路)≈5×周期：丢回波时盲走从 ~1m(旧3s)压到 ~0.5m(0.35m/s)。
+                                               // ⚠ 须≥右侧刷新周期：驱动 ultra_poll_period 调大或回退旧 1.2s/路时，须把 wall_stale_sec 同步上调，否则超声环↔odom兜底抖动
 
             // 快照右侧超声(加锁，修复原裸读竞态) + 新鲜度
             float front, rear; ros::Time ultra_stamp;
