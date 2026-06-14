@@ -4,7 +4,7 @@
 #include <csignal>      // [heading-straight-pd] signal/SIG_IGN/SIGINT/SIGTERM；SIGHUP/SIGPIPE 由 Linux <signal.h> 提供
 
 // [heading-straight-pd] 版本闸门：改功能必升版本，操作单 grep 自判
-#define CODE_VERSION "heading-straight-pd-v4-20260611"
+#define CODE_VERSION "heading-straight-pd-v5-speedcap0p4-20260614"
 
 // [heading-straight-pd] 自管 SIGINT/SIGTERM/SIGHUP：退出前补发零速，防驱动保持最后指令（驱动无看门狗，D-29）
 static volatile sig_atomic_t g_hs_stop = 0;
@@ -197,13 +197,15 @@ void MotionController::rosNode()
     pnh_.param<std::string>("log_path",     h_log_path_,         std::string("/tmp/heading_straight_log.csv"));
     h_sign_ = (h_sign_ >= 0) ? 1 : -1;
 
-    // 评审 MEDIUM(Fable5·失控级)：命令行速度/角速度无机器闸门，操作单笔误一位(0.1→1.0)=10倍速直达电机
-    // (驱动 sendKeyboardVelCommand 无饱和、轮速×230、无看门狗)。硬钳到设计参数表量程上界 0.3。
-    // 下界 0 保留 _straight_speed:=0 的原地 sign 测试路径。横幅打印的是钳后值(grep 自判按钳后值)。
+    // 命令行速度/角速度硬钳, 防操作单笔误一位(0.4→4.0)在控制器侧就直达 /cmd_vel。
+    // straight_speed 上限 0.4: 为测"加缓启动后 >0.3(0.3~0.4) 能否压住履带打滑"开放到 0.4; 0.4 直行峰值
+    // 轨速 ~0.59 m/s、电机命令 ~136, 正常工作区内, 远未触及驱动兜底阈值(max_track_speed=1.0/max_motor_cmd=300),
+    // 且笔误(0.4→4.0)被钳到 0.4。下界 0 保留 _straight_speed:=0 的原地 sign 测试路径。omega_limit 仍钳 0.3
+    // (差速航向权限充裕、与前进速度解耦)。横幅打印的是钳后值(grep 自判按钳后值)。
     {
         const double sp0 = h_speed_, om0 = h_omega_limit_, pm0 = h_pump_speed_;
         if (h_speed_       < 0.0) h_speed_       = 0.0;
-        if (h_speed_       > 0.3) h_speed_       = 0.3;
+        if (h_speed_       > 0.4) h_speed_       = 0.4;
         if (h_omega_limit_ < 0.0) h_omega_limit_ = 0.0;
         if (h_omega_limit_ > 0.3) h_omega_limit_ = 0.3;
         if (h_pump_speed_  < 0.0) h_pump_speed_  = 0.0;   // 泵占空比钳 [0,1]
