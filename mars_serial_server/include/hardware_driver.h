@@ -186,6 +186,7 @@ public:
     void UpdateImu();
     void UpdateImage();
     void UpdateUltra();
+    int  filterUltra(int idx, int raw_mm);  // 单路超声滤波: 有效性门 + 中值3 去尖峰 + 丢失保持(仅 RX 线程写)
 
     void sendAutoChargeCommand();
     void sendTestVelCommand();
@@ -296,6 +297,16 @@ private:
 
     vector<Infrared> Infrared_buf;
     std_msgs::Int32MultiArray dist_datas;
+
+    // ===== 超声滤波状态(每路 0..3, 仅 RX 线程 receiveMessage 写) =====
+    // 实测(2026-06-14 g2a_map CSV): MCU 自主推流 4 路各 ~10Hz; 此处滤掉单点尖峰 + OOR(65533/超量程) + 短暂丢失保持。
+    int   ultra_hist_[4][3];      // 最近≤3个有效原始值(中值3用)
+    int   ultra_hist_n_[4];       // 已积累有效样本数(<3 未满)
+    int   ultra_last_valid_[4];   // 最近有效输出(短暂丢失时保持)
+    int   ultra_invalid_cnt_[4];  // 连续无效计数(超 ultra_hold_max_ → 输出 OOR 哨兵 65533, 让消费侧 stale 逻辑接管)
+    int   ultra_min_valid_mm_;    // 有效下限(盲区, 默认 30)
+    int   ultra_max_valid_mm_;    // 有效上限(量程, 默认 6000; 实测水下~5m, >此或==65533 即 OOR)
+    int   ultra_hold_max_;        // 丢失保持最多帧数(默认 5≈0.5s@10Hz), 超则吐 65533
 
     int   update_nums;
     float theta_last;

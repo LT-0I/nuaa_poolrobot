@@ -23,7 +23,7 @@ MoveController::MoveController() :
     config_pump_speed_(0.0f),           
     user_config_pump_speed_(0.0f),      
     config_wall_align_(2.0f),
-    config_wall_stale_sec_(1.5f),
+    config_wall_stale_sec_(0.5f),
     ultra_right_seq_(0),
     last_ultra_raw_rf_(-1),
     last_ultra_raw_rr_(-1)
@@ -76,11 +76,11 @@ MoveController::MoveController() :
     nh_.param("pump_speed", temp_pump, 0.1f);
     user_config_pump_speed_ = 0.4f;
     nh_.param("wall_align", config_wall_align_, 2.0f);  // 目标距墙距离(m)，沿墙距离环用
-    // 右侧超声陈旧看门狗(s)：默认1.5(配 D-41 驱动右侧~0.3s/路、≈5×周期)；夹在[0.5,5.0]防误设。
-    // 下限0.5≥3×最快右侧刷新周期(驱动 ultra_poll_period 最小0.05→右0.15s)，留抖动裕度。
-    // ⚠ 须≥右侧实际刷新周期：若驱动 ultra_poll_period 调大或回退旧1.2s/路，须同步上调本值，否则超声环↔odom兜底抖动。
-    nh_.param("wall_stale_sec", config_wall_stale_sec_, 1.5f);
-    if (config_wall_stale_sec_ < 0.5f) config_wall_stale_sec_ = 0.5f;
+    // 右侧超声陈旧看门狗(s)：默认0.5(超声实测 MCU 推流 ~10Hz=0.1s/路、≈5×周期)；夹在[0.3,5.0]防误设。
+    // 实测(2026-06-14 g2a_map CSV)四路各 ~10Hz, 比旧推断的 0.83Hz 快得多→可比旧 1.5s 收紧, 丢回波盲走更短。
+    // ⚠ 须≥右侧实际刷新周期：若 MCU 推流率下降或驱动异常导致刷新变慢, 须同步上调本值, 否则超声环↔odom兜底抖动。
+    nh_.param("wall_stale_sec", config_wall_stale_sec_, 0.5f);
+    if (config_wall_stale_sec_ < 0.3f) config_wall_stale_sec_ = 0.3f;
     if (config_wall_stale_sec_ > 5.0f) config_wall_stale_sec_ = 5.0f;
     config_pump_speed_ = 0.0f;
 
@@ -95,9 +95,9 @@ MoveController::MoveController() :
     nh_.param("heading_yaw_timeout", config_heading_yaw_timeout_, 0.5);
     nh_.param("heading_sign",        config_heading_sign_,        1);
     config_heading_sign_ = (config_heading_sign_ >= 0) ? 1 : -1;
-    nh_.param("wall_k_dist",         config_wall_k_dist_,         0.03);
-    nh_.param("wall_k_par",          config_wall_k_par_,          0.30);
-    nh_.param("wall_off_max",        config_wall_off_max_,        0.08);
+    nh_.param("wall_k_dist",         config_wall_k_dist_,         0.20);  // 超声实测10Hz→比旧0.03激进; off_max 兜底
+    nh_.param("wall_k_par",          config_wall_k_par_,          0.60);
+    nh_.param("wall_off_max",        config_wall_off_max_,        0.10);
     nh_.param("speed_max",           config_speed_max_,           0.30f);
     nh_.param("softstart_sec",       config_softstart_sec_,       1.5f);
     if (config_softstart_sec_ < 0.0f) config_softstart_sec_ = 0.0f;
@@ -112,7 +112,7 @@ MoveController::MoveController() :
     if (config_speed_max_           > 0.35f) config_speed_max_         = 0.35f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-imu-cascade-20260614 (IMU-heading inner + ultra-wall outer + softstart)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-ultra10hz-20260614 (IMU-heading inner + ultra-wall outer 10Hz-tuned + softstart)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f",
@@ -592,7 +592,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
 
         if (correction_enabled && !wall_avoiding) {
             // 快照右侧超声(加锁) + 新鲜度; IMU 航向同线程读, 无需锁
-            // 陈旧看门狗 config_wall_stale_sec_(ROS 参数 wall_stale_sec): 须≥右侧刷新周期, 随驱动 ultra_poll_period 调
+            // 陈旧看门狗 config_wall_stale_sec_(ROS 参数 wall_stale_sec): 须≥右侧刷新周期; 超声实测 MCU 推流 ~10Hz=0.1s/路, 默认 0.5s
             float front, rear; ros::Time ultra_stamp;
             {
                 std::lock_guard<std::mutex> lk(sensor_mutex_);
@@ -609,7 +609,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                               (ros::Time::now() - hs_yaw_stamp_).toSec() < config_heading_yaw_timeout_);
 
             // ---- 外环: 距墙/平行 → 有界航向偏置 C ----
-            // C 单位 = rad(等效航向偏置, 叠进航向误差 e_total); K_DIST[rad/m] K_PAR[rad/m]; off_max 0.08≈4.6°。仅新鲜有效超声时刷新。
+            // C 单位 = rad(等效航向偏置, 叠进航向误差 e_total); K_DIST[rad/m] K_PAR[rad/m]; off_max 0.10≈5.7°(安全上界)。仅新鲜有效超声时刷新。
             float d = -1.0f, e_par = 0.0f, C = 0.0f;
             if (ultra_ok) {
                 d = 0.5f * (front + rear);              // 距右墙

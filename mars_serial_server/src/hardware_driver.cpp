@@ -85,6 +85,14 @@ HardwareDriver::HardwareDriver(CallbackAsyncSerial *serial)
     // cap.set(CAP_PROP_FRAME_WIDTH,3840);
     // cap.set(CAP_PROP_FRAME_HEIGHT,1280);
     dist_datas.data.resize(4);
+    // 超声滤波状态初始化(默认值; rosNode() 中可被 ROS 参数覆盖)。起始置 OOR 哨兵=首帧前消费侧判"无数据"。
+    ultra_min_valid_mm_ = 30; ultra_max_valid_mm_ = 6000; ultra_hold_max_ = 5;
+    for (int i = 0; i < 4; i++) {
+        ultra_hist_n_[i]     = 0;
+        ultra_invalid_cnt_[i]= ultra_hold_max_ + 1;
+        ultra_last_valid_[i] = 65533;
+        dist_datas.data[i]   = 65533;
+    }
     // dist_datas.data.push_back(0);
     // dist_datas.data.push_back(0);
     // dist_datas.data.push_back(0);
@@ -192,18 +200,23 @@ void HardwareDriver::rosNode()
         }
     );
 
-    // 超声请求周期可调：默认 0.1s=10次/秒，匹配 MCU 上限"四路超声每秒10帧"(MCU侧工程师 2026-06-13 告知)。
-    // 配合下方 sendUltraCommand 的右侧优先调度→右前/右后各 ~3.3Hz、前左/前右各 ~1.67Hz(原四路均 0.83Hz)。
-    // 实际刷新率 = min(请求率, MCU 应答率)；可经 ROS 参数 ultra_poll_period 覆盖、夹在 [0.05,0.5]s 防误设。
+    // 超声采集机制(2026-06-14 g2a_map CSV 实测定谳): MCU 自主推流 4 路各 ~10Hz、/ultra_data 话题 20Hz 转发。
+    //   ⟹ 数据刷新率由 MCU 推流决定; 下方 sendUltraCommand 的请求并不门控刷新率(现场轮询 0.3s 与 0.1s 均得 10Hz/路)。
+    //   早先 D-41"轮询 0.83Hz、右侧优先调度提速"系纯代码推断的误诊, 已被实测推翻。请求保留仅作兼容/潜在保活, 对速率无实质影响。
+    //   真正的"获取优化"在 RX 侧滤波 filterUltra(有效性门 + 中值3 去尖峰 + 丢失保持), 见 receiveMessage / filterUltra。
     double ultra_poll_period = 0.1;
     nh_.param("ultra_poll_period", ultra_poll_period, 0.1);
     if (ultra_poll_period < 0.05) ultra_poll_period = 0.05;
     if (ultra_poll_period > 0.5)  ultra_poll_period = 0.5;
-    // 右侧优先调度[3,4,1,3,4,2]：右前/右后每3拍刷新、前左/前右每6拍刷新(非均匀)。
-    ROS_INFO("ultra_poll_period = %.3f s | right(rf/rr) ~%.2f s / %.2f Hz | front(fl/fr) ~%.2f s / %.2f Hz",
-             ultra_poll_period,
-             ultra_poll_period * 3.0, 1.0 / (ultra_poll_period * 3.0),
-             ultra_poll_period * 6.0, 1.0 / (ultra_poll_period * 6.0));
+    // 超声滤波参数(全局 ROS 参数; 成员 nh_ 为全局命名空间→启动前 rosparam set /ultra_max_valid_mm X 覆盖, 不能用 _x:=)
+    nh_.param("ultra_min_valid_mm", ultra_min_valid_mm_, ultra_min_valid_mm_);
+    nh_.param("ultra_max_valid_mm", ultra_max_valid_mm_, ultra_max_valid_mm_);
+    nh_.param("ultra_hold_max",     ultra_hold_max_,     ultra_hold_max_);
+    if (ultra_min_valid_mm_ < 0)   ultra_min_valid_mm_ = 0;
+    if (ultra_max_valid_mm_ < ultra_min_valid_mm_ + 1) ultra_max_valid_mm_ = ultra_min_valid_mm_ + 1;
+    if (ultra_hold_max_ < 0)       ultra_hold_max_ = 0;
+    ROS_INFO("ultra: MCU push ~10Hz/ch (CSV-verified); poll vestigial(period=%.3fs). filter valid[%d,%d]mm median-3 hold<=%dframes->OOR65533",
+             ultra_poll_period, ultra_min_valid_mm_, ultra_max_valid_mm_, ultra_hold_max_);
     ros::Timer ultra_timer = nh_.createTimer(
         ros::Duration(ultra_poll_period),  // 可调请求周期(默认0.1s)
         [this](const ros::TimerEvent&) {
@@ -411,24 +424,14 @@ void HardwareDriver::receiveMessage(const char data[], unsigned int len)
                     break;
                 case CM_ULTRA_DATA_ID:
                     memcpy(&ultra_datas, recv_msg.payload, sizeof(UltraDatas));
-                    // cout << "receive ultra_datas" << endl;
-                    // for(int i = 0; i<sizeof(recv_msg.payload);i++){
-                    //     cout <<i<<" "<< (int)recv_msg.payload[i] << endl;
-                    // }
-                    if((int)ultra_datas.ultra_id == 1){
-                        dist_datas.data[0] = (int)ultra_datas.ultra_dist;
-                    }else if((int)ultra_datas.ultra_id == 2){
-                        dist_datas.data[1] = (int)ultra_datas.ultra_dist;
-                    }else if((int)ultra_datas.ultra_id == 3){
-                        dist_datas.data[2] = (int)ultra_datas.ultra_dist;
-                    }else if((int)ultra_datas.ultra_id == 4){
-                        dist_datas.data[3] = (int)ultra_datas.ultra_dist;
+                    {
+                        // 消费侧映射(用户 2026-06-13 定): id 1->data[0]前左, 2->前右, 3->右前, 4->右后。
+                        // MCU 每路推流 ~10Hz; 经 filterUltra(有效性门+中值3+丢失保持)滤波后存入(去尖峰/OOR 65533/噪声)。
+                        int uid = (int)ultra_datas.ultra_id;
+                        if (uid >= 1 && uid <= 4) {
+                            dist_datas.data[uid - 1] = filterUltra(uid - 1, (int)ultra_datas.ultra_dist);
+                        }
                     }
-
-                    
-                    // cout << "ultra_datas.ultra_id = " << (int)ultra_datas.ultra_id <<endl;
-                    // cout << "ultra_datas.ultra_dist = " << (int)ultra_datas.ultra_dist <<endl;
-                    // cout << endl;
                     break;
                 }
             }
@@ -546,7 +549,47 @@ void HardwareDriver::UpdateImage()
     cv::Mat right_frame;
  
 }
- 
+
+// 单路超声滤波(仅 RX 线程 receiveMessage 调用, idx∈[0,3]): 有效性门 + 中值3 去尖峰 + 短暂丢失保持。
+//   设计依据(2026-06-14 g2a_map CSV 实测): 右侧控制两路本就很安静(p90 跳变 1mm), 单点尖峰偶发;
+//   故用中值3(去单点尖峰、近零滞后), 不做 EMA(会引入 12-21mm 滞后并糊掉真实运动, 损害控制)。
+//   OOR(65533/超量程/盲区) 短暂→保持上次有效; 连续超 ultra_hold_max_ 帧→吐 65533 让消费侧 stale 接管。
+int HardwareDriver::filterUltra(int idx, int raw_mm)
+{
+    if (idx < 0 || idx > 3) return raw_mm;
+    bool valid = (raw_mm >= ultra_min_valid_mm_ && raw_mm <= ultra_max_valid_mm_ && raw_mm != 65533);
+    if (!valid) {
+        if (ultra_invalid_cnt_[idx] <= ultra_hold_max_) ultra_invalid_cnt_[idx]++;
+        if (ultra_invalid_cnt_[idx] > ultra_hold_max_) {
+            ultra_hist_n_[idx] = 0;        // 丢失过久: 清历史(防恢复后旧值参与中值), 吐 OOR 哨兵
+            return 65533;
+        }
+        return ultra_last_valid_[idx];     // 短暂丢失: 保持上次有效
+    }
+    ultra_invalid_cnt_[idx] = 0;
+    // 滑入最近≤3个有效原始值
+    if (ultra_hist_n_[idx] < 3) {
+        ultra_hist_[idx][ultra_hist_n_[idx]] = raw_mm;
+        ultra_hist_n_[idx]++;
+    } else {
+        ultra_hist_[idx][0] = ultra_hist_[idx][1];
+        ultra_hist_[idx][1] = ultra_hist_[idx][2];
+        ultra_hist_[idx][2] = raw_mm;
+    }
+    int out;
+    if (ultra_hist_n_[idx] >= 3) {
+        int a = ultra_hist_[idx][0], b = ultra_hist_[idx][1], c = ultra_hist_[idx][2];
+        // 中值3(纯比较, 不依赖 <algorithm>): 取落在另两者之间的那个
+        if      ((a >= b && a <= c) || (a <= b && a >= c)) out = a;
+        else if ((b >= a && b <= c) || (b <= a && b >= c)) out = b;
+        else                                               out = c;
+    } else {
+        out = raw_mm;  // 未满3样本(启动瞬态): 直接用
+    }
+    ultra_last_valid_[idx] = out;
+    return out;
+}
+
 void HardwareDriver::UpdateUltra()
 {
     // cout << "dist_datas " << dist_datas.data[0] <<  " " << dist_datas.data[1] << " " << dist_datas.data[2] << endl;
