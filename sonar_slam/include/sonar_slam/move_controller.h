@@ -209,10 +209,11 @@ private:
 
     bool rotateToTargetAngle(float target_angle_deg, float timeout = 8.0f);
 
-    // 右侧超声"新鲜度"跟踪：每通道真实 ~0.83Hz，原始值变化即视为收到新帧
-    // (修复拐角在 20Hz 循环里反复读 0.83Hz 旧值导致提前停的根因)
-    uint32_t ultra_right_seq_;     // 右侧任一通道原始值变化时自增
-    ros::Time ultra_right_stamp_;  // 右侧最近一次值变化时间(陈旧看门狗用)
+    // 右侧超声"新鲜度"跟踪。超声实测 MCU 推流 ~10Hz/通道、/ultra_data 话题 ~20Hz 转发(ZOH)。
+    // seq=拐角 stop-and-settle 用(只在原始值真变化时推进, 避免对 ZOH 重复值重复精修);
+    // stamp=陈旧看门狗用, 每次消息到达即更新、与值变化【解耦】(平直墙真实距离恒定时不会被误判 stale)。
+    uint32_t ultra_right_seq_;     // 右侧任一通道原始值变化时自增(拐角精修用)
+    ros::Time ultra_right_stamp_;  // 右侧超声最近一次消息到达时间(陈旧看门狗用; 每帧更新, 与值变化解耦)
     int last_ultra_raw_rf_;        // 上次原始 data[2]
     int last_ultra_raw_rr_;        // 上次原始 data[3]
 

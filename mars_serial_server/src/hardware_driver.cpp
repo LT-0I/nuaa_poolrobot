@@ -558,7 +558,8 @@ void HardwareDriver::UpdateImage()
 int HardwareDriver::filterUltra(int idx, int raw_mm)
 {
     if (idx < 0 || idx > 3) return raw_mm;
-    bool valid = (raw_mm >= ultra_min_valid_mm_ && raw_mm <= ultra_max_valid_mm_ && raw_mm != 65533);
+    // 严格 >/<  对齐消费侧 front_valid(>0.05m && <5.0m)的开区间, 消除 ±1 边界死区(评审 LOW)
+    bool valid = (raw_mm > ultra_min_valid_mm_ && raw_mm < ultra_max_valid_mm_ && raw_mm != 65533);
     if (!valid) {
         if (ultra_invalid_cnt_[idx] <= ultra_hold_max_) ultra_invalid_cnt_[idx]++;
         if (ultra_invalid_cnt_[idx] > ultra_hold_max_) {
