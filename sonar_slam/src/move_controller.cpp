@@ -47,7 +47,12 @@ MoveController::MoveController() :
     // 订阅超声波和红外数据
     ultra_sub_ = nh_.subscribe("/ultra_data", 100, &MoveController::ultraCallback, this);
     ROS_INFO("订阅器: /ultra_data");
-    
+
+    // 订阅 IMU 融合航向 /imu_heading(度) —— 串级直行内环用(由 mars_serial_server 驱动发布;
+    // 老驱动无此话题时控制器自动退化为 odom 兜底, 不会失效)
+    imu_heading_sub_ = nh_.subscribe("/imu_heading", 50, &MoveController::imuHeadingCallback, this);
+    ROS_INFO("订阅器: /imu_heading");
+
     // 创建服务服务器
     move_straight_srv_ = nh_.advertiseService(
         "/move_controller/move_straight", 
@@ -65,7 +70,8 @@ MoveController::MoveController() :
     );
     
     // 读取水泵速度参数
-    nh_.param("speed", config_speed_, 0.35f);
+    // 默认 0.25(0614 实测能走直的速度; 高于 ~0.27 履带打滑临界会侧滑); 实际再夹 speed_max
+    nh_.param("speed", config_speed_, 0.25f);
     float temp_pump = 0.0f;
     nh_.param("pump_speed", temp_pump, 0.1f);
     user_config_pump_speed_ = 0.4f;
@@ -77,6 +83,33 @@ MoveController::MoveController() :
     if (config_wall_stale_sec_ < 0.5f) config_wall_stale_sec_ = 0.5f;
     if (config_wall_stale_sec_ > 5.0f) config_wall_stale_sec_ = 5.0f;
     config_pump_speed_ = 0.0f;
+
+    // ===== 串级直行参数(ROS 全局参数: 启动前 rosparam set /xxx; 默认=0614实测好值) =====
+    // 内环 = 0614 实测能走直的 IMU 航向 PD; 外环 = doc 分支超声距墙/平行环(折成航向偏置)
+    nh_.param("heading_kp",          config_heading_kp_,          1.0);
+    nh_.param("heading_kd",          config_heading_kd_,          1.0);
+    nh_.param("heading_ki",          config_heading_ki_,          0.0);
+    nh_.param("heading_i_clamp",     config_heading_i_clamp_,     0.05);
+    nh_.param("heading_omega_limit", config_heading_omega_limit_, 0.15);
+    nh_.param("heading_tau_d",       config_heading_tau_d_,       0.2);
+    nh_.param("heading_yaw_timeout", config_heading_yaw_timeout_, 0.5);
+    nh_.param("heading_sign",        config_heading_sign_,        1);
+    config_heading_sign_ = (config_heading_sign_ >= 0) ? 1 : -1;
+    nh_.param("wall_k_dist",         config_wall_k_dist_,         0.03);
+    nh_.param("wall_k_par",          config_wall_k_par_,          0.30);
+    nh_.param("wall_off_max",        config_wall_off_max_,        0.08);
+    nh_.param("speed_max",           config_speed_max_,           0.30f);
+    nh_.param("softstart_sec",       config_softstart_sec_,       1.5f);
+    if (config_softstart_sec_ < 0.0f) config_softstart_sec_ = 0.0f;
+    if (config_softstart_sec_ > 10.0f) config_softstart_sec_ = 10.0f;
+    // 夹限防误设(总角速度 ≤0.3 cmd; 外环偏置 ≤0.3; 速度上限 ≤0.35)
+    if (config_heading_omega_limit_ < 0.0) config_heading_omega_limit_ = 0.0;
+    if (config_heading_omega_limit_ > 0.3) config_heading_omega_limit_ = 0.3;
+    if (config_heading_tau_d_       < 0.02) config_heading_tau_d_      = 0.02;
+    if (config_wall_off_max_        < 0.0) config_wall_off_max_        = 0.0;
+    if (config_wall_off_max_        > 0.3) config_wall_off_max_        = 0.3;
+    if (config_speed_max_           < 0.05f) config_speed_max_         = 0.05f;
+    if (config_speed_max_           > 0.35f) config_speed_max_         = 0.35f;
 
     ROS_INFO("========================================");
     ROS_INFO("MoveController 配置参数:");
@@ -135,727 +168,6 @@ bool MoveController::moveStraightCallback(sonar_slam::MoveStraight::Request& req
 }
 
 // ==================== 核心功能：高级直线行走（带避让）====================
-/*****
-bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float max_speed, float timeout) {
-    if (move_state_ != 0) {
-        ROS_ERROR("机器人正在行走中，无法开始新的行走");
-        return false;
-    }
-    
-    ROS_ERROR("========================================");
-    ROS_ERROR("高级直线行走开始（带行走中池壁检测与避让）");
-    ROS_ERROR("  距离: %.3f米", distance);
-    ROS_ERROR("  速度: %.3f米/秒", max_speed);
-    ROS_ERROR("  超时: %.1f秒", timeout);
-    ROS_ERROR("  水泵速度: %.1f", user_config_pump_speed_);
-    ROS_ERROR("========================================");
-    
-    if (user_config_pump_speed_ > 0.01f) {
-        config_pump_speed_ = user_config_pump_speed_;
-        ROS_INFO("✅ 行走开始，激活水泵，速度: %.0f%%", config_pump_speed_ * 100);
-    }
-    ROS_INFO("✅ 行走开始，激活水泵，速度: %.0f%%", config_pump_speed_ * 100);
-    
-    move_state_ = 1;  // 行走中
-    
-    const float DEG_TO_RAD = M_PI / 180.0f;
-    const float RAD_TO_DEG = 180.0f / M_PI;
-    
-    // ========== 初始化参数 ==========
-    float target_distance = fabs(distance);
-    char move_direction = (distance >= 0) ? 'w' : 'x';
-    const float SPEED_CALIBRATION = 0.885f;
-    float desired_speed = std::min(max_speed, 0.35f);
-    float cmd_speed = desired_speed / SPEED_CALIBRATION;
-    if (cmd_speed > 0.35f) cmd_speed = 0.35f;
-    
-    
-    // 清除键盘模拟器状态
-    {
-        std::lock_guard<std::mutex> lock(keyboard_mutex_);
-        keyboard_sim_.current_vx = 0.0f;
-        keyboard_sim_.current_vy = 0.0f;
-        keyboard_sim_.target_vx = 0.0f;
-        keyboard_sim_.target_angular = 0.0f;
-        keyboard_sim_.idle_counter = 0;
-        keyboard_sim_.key_pressed = false;
-    }
-    
-    // 设置目标速度
-    {
-        std::lock_guard<std::mutex> lock(keyboard_mutex_);
-        if (move_direction == 'w') {
-            keyboard_sim_.target_vx = cmd_speed;
-            keyboard_sim_.current_vx = cmd_speed;
-        } else {
-            keyboard_sim_.target_vx = -cmd_speed;
-            keyboard_sim_.current_vx = -cmd_speed;
-        }
-        keyboard_sim_.target_angular = 0.0f;
-        keyboard_sim_.idle_counter = 0;
-        keyboard_sim_.key_pressed = true;
-    }
-    
-    // 记录起始位置
-    updateCurrentPose();
-    geometry_msgs::Pose2D start_pose = current_pose_;
-    float start_yaw = current_pose_.theta;
-    float total_traveled = 0.0f;
-    geometry_msgs::Pose2D last_pose = start_pose;
-    
-    float pump_speed = config_pump_speed_;
-    bool pump_on = (pump_speed > 0.01f);
-    if (pump_on) {
-        geometry_msgs::Twist pump_cmd;
-        pump_cmd.linear.x = cmd_speed;
-        pump_cmd.linear.y = pump_speed;
-        pump_cmd.angular.z = 0.0f;
-        cmd_vel_pub_.publish(pump_cmd);
-        ROS_INFO("水泵已开启，速度: %.0f%%", pump_speed * 100);
-        ros::Duration(0.3).sleep();
-    }
-    
-    ros::Time start_time = ros::Time::now();
-    bool success = false;
-    bool wall_avoiding = false;
-    int front_wall_detect_count = 0;
-    
-    // 纠偏相关变量
-    ros::Time loop_start_time = ros::Time::now();
-    bool correction_enabled = false;
-    ros::Time last_correction_time = ros::Time::now();
-    
-    // ========== 主循环 ==========
-    while (ros::ok() && move_state_ == 1) {
-        updateCurrentPose();
-        
-        // 超时检查
-        if ((ros::Time::now() - start_time).toSec() > timeout) {
-            ROS_ERROR("行走超时");
-            break;
-        }
-        
-        // 计算已走距离（累积）
-        float dx = current_pose_.x - last_pose.x;
-        float dy = current_pose_.y - last_pose.y;
-        float delta = sqrt(dx*dx + dy*dy);
-        if (delta > 0.001f && delta < 0.5f) {
-            total_traveled += delta;
-        }
-        last_pose = current_pose_;
-        
-        float remaining = target_distance - total_traveled;
-        
-        // ========== 前方池壁检测（使用红外传感器）==========
-        if (!wall_avoiding && move_direction == 'w') {
-            float front_left_dist = wall_sensors_.infra_front_left;
-            float front_right_dist = wall_sensors_.infra_front_right;
-            float front_dist = std::min(front_left_dist, front_right_dist);
-            bool has_front_wall = (front_dist > 0.1f && front_dist < 1.0f);
-            
-            if (has_front_wall) {
-                front_wall_detect_count++;
-                if (front_wall_detect_count >= 3) {
-                    ROS_WARN("行走中检测到前方池壁(%.2f米)，执行避让！", front_dist);
-                    wall_avoiding = true;
-                    
-                    // ========== 1. 停止 ==========
-                    stop();
-                    ros::Duration(0.3).sleep();
-                    ros::spinOnce();
-                    updateCurrentPose();
-                    ROS_INFO("停止后角度: %.1f°", current_pose_.theta * RAD_TO_DEG);
-                    
-                    // ========== 2. 后退0.8米 ==========
-                    ROS_INFO("后退 0.8 米");
-                    disabling_timer_ = true;
-                    
-                    float backup_speed = 0.20f;
-                    float backup_time = 0.8f / backup_speed;
-                    ros::Time backup_start = ros::Time::now();
-                    
-                    while (ros::ok()) {
-                        float elapsed = (ros::Time::now() - backup_start).toSec();
-                        if (elapsed >= backup_time) break;
-                        
-                        geometry_msgs::Twist cmd;
-                        cmd.linear.x = -backup_speed;
-                        cmd.linear.y = pump_speed;
-                        cmd.angular.z = 0.0f;
-                        cmd_vel_pub_.publish(cmd);
-                        ros::Duration(0.02).sleep();
-                        ros::spinOnce();
-                    }
-                    
-                    // 停止
-                    geometry_msgs::Twist stop_cmd;
-                    stop_cmd.linear.x = 0.0f;
-                    stop_cmd.linear.y = 0.0f;
-                    stop_cmd.angular.z = 0.0f;
-                    cmd_vel_pub_.publish(stop_cmd);
-                    
-                    disabling_timer_ = false;
-                    ROS_INFO("后退完成");
-                    ros::Duration(0.3).sleep();
-                    updateCurrentPose();
-                    ROS_INFO("后退后角度: %.1f°", current_pose_.theta * RAD_TO_DEG);
-                    
-                    // ========== 3. 左转90度 ==========
-                    ROS_INFO("左转90度");
-                    float turn_start_yaw = current_pose_.theta;
-                    ros::Time turn_start_time = ros::Time::now();
-                    bool turn_completed = false;
-                    
-                    while (ros::ok()) {
-                        ros::spinOnce();
-                        updateCurrentPose();
-                        
-                        float yaw_change = current_pose_.theta - turn_start_yaw;
-                        if (yaw_change > M_PI) yaw_change -= 2 * M_PI;
-                        float abs_yaw_change = fabs(yaw_change);
-                        float elapsed = (ros::Time::now() - turn_start_time).toSec();
-                        
-                        if (abs_yaw_change > 85.0f * DEG_TO_RAD || elapsed > 10.0f) {
-                            stop();
-                            ROS_INFO("左转完成: 累计转角=%.1f°", abs_yaw_change * RAD_TO_DEG);
-                            turn_completed = true;
-                            break;
-                        }
-                        
-                        geometry_msgs::Twist cmd;
-                        cmd.linear.x = 0.0f;
-                        cmd.linear.y = pump_speed;
-                        cmd.angular.z = 0.25f;
-                        cmd_vel_pub_.publish(cmd);
-                        ros::Duration(0.05).sleep();
-                    }
-                    
-                    if (!turn_completed) {
-                        ROS_ERROR("左转90度失败");
-                        move_state_ = 2;
-                        return false;
-                    }
-                    ros::Duration(0.3).sleep();
-                    
-                    // ========== 4. 右侧平行度对齐 ==========
-                    ROS_INFO("右侧平行度对齐");
-                    alignToRightWallOnly();
-                    ros::Duration(0.3).sleep();
-                    
-                    // ========== 5. 更新状态 ==========
-                    target_distance = fabs(distance) - total_traveled;
-                    start_pose = current_pose_;
-                    start_yaw = current_pose_.theta;
-                    last_pose = current_pose_;
-                    start_time = ros::Time::now();
-                    wall_avoiding = false;
-                    front_wall_detect_count = 0;
-                    
-                    ROS_INFO("避让完成，继续行走，已走: %.2f米, 剩余: %.2f米", 
-                            total_traveled, target_distance);
-                    
-                    // 恢复前进速度
-                    {
-                        std::lock_guard<std::mutex> lock(keyboard_mutex_);
-                        if (move_direction == 'w') {
-                            keyboard_sim_.target_vx = cmd_speed;
-                            keyboard_sim_.current_vx = cmd_speed;
-                        }
-                        keyboard_sim_.target_angular = 0.0f;
-                        keyboard_sim_.idle_counter = 0;
-                        keyboard_sim_.key_pressed = true;
-                    }
-                    continue;
-                }
-            } else {
-                front_wall_detect_count = 0;
-            }
-        }
-        
-        // 到达目标
-        if (remaining < 0.05f) {
-            stop();
-            success = true;
-            ROS_ERROR("✅ 行走完成！实际距离: %.3f米", total_traveled);
-            break;
-        }
-        
-        // 减速区
-        float slow_down_dist = 0.3f;
-        float current_speed = cmd_speed;
-        if (remaining < slow_down_dist && remaining > 0) {
-            current_speed = cmd_speed * std::max(0.3f, remaining / slow_down_dist);
-        }
-        
-        // 提前关泵
-        float pump_off_dist = 0.3f;
-        if (pump_on && remaining < pump_off_dist && remaining > 0) {
-            pump_on = false;
-            config_pump_speed_ = 0.0f;
-            ROS_INFO("快到目的地，水泵已关闭");
-        }
-        
-        // ========== 角度纠偏 ==========
-        float relative_theta = normalizeAngle(current_pose_.theta - start_yaw);
-        
-        if (!correction_enabled && (ros::Time::now() - loop_start_time).toSec() > 2.0) {
-            correction_enabled = true;
-            ROS_WARN("启动连续按键纠偏");
-        }
-        
-        if (correction_enabled && !wall_avoiding) {
-            if ((ros::Time::now() - last_correction_time).toSec() > 1.0) {
-                if (move_direction == 'w') {
-                    if (relative_theta < -0.05f) {
-                        applyKeyboardCommand('a');
-                        keyboard_sim_.target_angular = 0.3f;
-                    } else if (relative_theta > 0.05f) {
-                        applyKeyboardCommand('d');
-                        keyboard_sim_.target_angular = -0.3f;
-                    }
-                }
-                last_correction_time = ros::Time::now();
-            }
-        }
-        
-        // 发送移动命令
-        geometry_msgs::Twist cmd;
-        cmd.linear.x = (move_direction == 'w') ? current_speed : -current_speed;
-        cmd.linear.y = pump_on ? pump_speed : 0.0f;
-        cmd.angular.z = keyboard_sim_.target_angular;
-        cmd_vel_pub_.publish(cmd);
-        
-        // 进度打印
-        static ros::Time last_print = ros::Time::now();
-        if ((ros::Time::now() - last_print).toSec() > 1.0) {
-            float progress = (total_traveled / fabs(distance)) * 100.0f;
-            ROS_INFO("进度: %.1f%%, 已走%.2f/%.2f米", 
-                     progress, total_traveled, fabs(distance));
-            last_print = ros::Time::now();
-        }
-        
-        ros::spinOnce();
-        ros::Duration(0.05).sleep();
-    }
-    
-    // 最终停止并关泵
-    stop();
-    if (pump_on) {
-        geometry_msgs::Twist cmd;
-        cmd.linear.x = 0.0f;
-        cmd.linear.y = 0.0f;
-        cmd.angular.z = 0.0f;
-        cmd_vel_pub_.publish(cmd);
-        config_pump_speed_ = 0.0f;
-        ROS_INFO("水泵已关闭");
-    }
-    
-    move_state_ = success ? 0 : 2;
-    return success;
-}
-
-
-// ==================== 核心功能：高级直线行走（带避让）====================
-bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float max_speed, float timeout) {
-    if (move_state_ != 0) {
-        ROS_ERROR("机器人正在行走中，无法开始新的行走");
-        return false;
-    }
-     // ========== 初始化行走日志 ==========
-    initWalkLog("move_advanced_walk", fabs(distance));
-
-    ROS_ERROR("========================================");
-    ROS_ERROR("高级直线行走开始（带行走中池壁检测与避让）");
-    ROS_ERROR("  距离: %.3f米", distance);
-    ROS_ERROR("  速度: %.3f米/秒", max_speed);
-    ROS_ERROR("  超时: %.1f秒", timeout);
-    ROS_ERROR("  水泵速度: %.1f", user_config_pump_speed_);
-    ROS_ERROR("========================================");
-    
-    if (user_config_pump_speed_ > 0.01f) {
-        config_pump_speed_ = user_config_pump_speed_;
-        ROS_INFO("✅ 行走开始，激活水泵，速度: %.0f%%", config_pump_speed_ * 100);
-    }
-    
-    move_state_ = 1;  // 行走中
-    disabling_timer_ = true;  // 禁用键盘定时器
-    
-    const float DEG_TO_RAD = M_PI / 180.0f;
-    const float RAD_TO_DEG = 180.0f / M_PI;
-    const float SPEED_CALIBRATION = 0.985f;
-    
-    float total_target = fabs(distance);
-    char move_direction = (distance >= 0) ? 'w' : 'x';
-    float desired_speed = std::min(max_speed, 0.35f);
-    float cmd_speed = desired_speed / SPEED_CALIBRATION;
-    cmd_speed = 0.35f;
-    
-    // 清除键盘模拟器状态
-    {
-        std::lock_guard<std::mutex> lock(keyboard_mutex_);
-        keyboard_sim_.current_vx = 0.0f;
-        keyboard_sim_.current_vy = 0.0f;
-        keyboard_sim_.target_vx = 0.0f;
-        keyboard_sim_.target_angular = 0.0f;
-        keyboard_sim_.idle_counter = 0;
-        keyboard_sim_.key_pressed = false;
-    }
-    
-    // 等待odom数据
-    if (!waitForOdom(5.0f)) {
-        ROS_ERROR("等待odom数据超时");
-        disabling_timer_ = false;
-        move_state_ = 2;
-        return false;
-    }
-    
-    // 强制刷新里程计
-    for (int i = 0; i < 5; i++) {
-        ros::spinOnce();
-        ros::Duration(0.05).sleep();
-    }
-    updateCurrentPose();
-    
-    // 记录起点（仅用于角度参考）
-    geometry_msgs::Pose2D start_pose = current_pose_;
-    float start_yaw = current_pose_.theta;
-    
-    // ========== 累积路程变量 ==========
-    float total_accumulated_distance = 0.0f;
-    geometry_msgs::Pose2D last_pose = current_pose_;
-    
-    ROS_ERROR("起始状态: 位置(%.2f,%.2f), 角度=%.1f°", 
-              start_pose.x, start_pose.y, start_yaw * RAD_TO_DEG);
-    
-    float pump_speed = config_pump_speed_;
-    bool pump_on = (pump_speed > 0.01f);
-    if (pump_on) {
-        geometry_msgs::Twist pump_cmd;
-        pump_cmd.linear.x = cmd_speed;
-        pump_cmd.linear.y = pump_speed;
-        pump_cmd.angular.z = 0.0f;
-        cmd_vel_pub_.publish(pump_cmd);
-        ROS_INFO("水泵已开启，速度: %.0f%%", pump_speed * 100);
-        ros::Duration(0.3).sleep();
-    }
-    
-    ros::Time start_time = ros::Time::now();
-    bool success = false;
-    bool wall_avoiding = false;
-    int front_wall_detect_count = 0;
-    bool pump_closed_early = false;
-    
-    // 角度累积变量
-    float total_yaw_change = 0.0f;
-    float last_theta = start_yaw;
-    
-    // 纠偏相关变量
-    ros::Time correction_start_time = ros::Time::now();
-    bool correction_enabled = false;
-    ros::Time last_correction_time = ros::Time::now();
-    float current_angular_correction = 0.0f;
-    
-    // ========== 设置目标速度 ==========
-    {
-        std::lock_guard<std::mutex> lock(keyboard_mutex_);
-        if (move_direction == 'w') {
-            keyboard_sim_.target_vx = cmd_speed;
-            keyboard_sim_.current_vx = cmd_speed;
-        } else {
-            keyboard_sim_.target_vx = -cmd_speed;
-            keyboard_sim_.current_vx = -cmd_speed;
-        }
-        keyboard_sim_.target_angular = 0.0f;
-        keyboard_sim_.idle_counter = 0;
-        keyboard_sim_.key_pressed = true;
-    }
-    
-    // ========== 主循环 ==========
-    while (ros::ok() && move_state_ == 1) {
-        updateCurrentPose();
-        
-        // 超时检查
-        if ((ros::Time::now() - start_time).toSec() > timeout) {
-            ROS_ERROR("行走超时");
-            break;
-        }
-        
-        // ========== 使用累积路程（只增不减） ==========
- 
-        float dx = current_pose_.x - last_pose.x;
-        float dy = current_pose_.y - last_pose.y;
-        float delta = sqrt(dx*dx + dy*dy);
-
-        // 直接累加，不乘系数
-        if (delta > 0.001f && delta < 0.5f) {
-            total_accumulated_distance += delta;
-        }
-        
-        last_pose = current_pose_;
-        float remaining = total_target - total_accumulated_distance;
-        
-        // 累积角度变化（用于纠偏）
-        float delta_yaw = normalizeAngle(current_pose_.theta - last_theta);
-        total_yaw_change += delta_yaw;
-        last_theta = current_pose_.theta;
-
-         recordWalkData(total_accumulated_distance, total_target);
-        
-        // ==================== 池壁检测 ====================
-        if (!wall_avoiding && move_direction == 'w') {
-            float front_left_dist = wall_sensors_.infra_front_left;
-            float front_right_dist = wall_sensors_.infra_front_right;
-            float front_dist = std::min(front_left_dist, front_right_dist);
-            bool has_front_wall = (front_dist > 0.3f && front_dist < 1.5f);
-            
-            if (has_front_wall) {
-                front_wall_detect_count++;
-                if (front_wall_detect_count >= 3) {
-                    ROS_WARN("行走中检测到前方池壁(%.2f米)，执行避让！", front_dist);
-                    wall_avoiding = true;
-                    
-                    // ----- 1. 停止 -----
-                    stop();
-                    ros::Duration(0.3).sleep();
-                    ros::spinOnce();
-                    
-                    // 等待1.5秒后开始旋转
-                    ROS_INFO("等待1.5秒后开始旋转...");
-                    ros::Duration(1.5).sleep();
-                    ros::spinOnce();
-                    updateCurrentPose();
-                    
-                    // ----- 2. 左转至右侧平行于池壁 -----
-                    ROS_INFO("左转至右侧平行于池壁");
-                    float turn_start = current_pose_.theta;
-                    ros::Time turn_start_time = ros::Time::now();
-                    bool parallel_check_enabled = false;
-                    
-                    while (ros::ok()) {
-                        ros::spinOnce();
-                        updateCurrentPose();
-                        
-                        // 计算已转角度
-                        float yaw_change = current_pose_.theta - turn_start;
-                        if (yaw_change > M_PI) yaw_change -= 2 * M_PI;
-                        float abs_yaw = fabs(yaw_change);
-                        
-                        // 超时保护
-                        if ((ros::Time::now() - turn_start_time).toSec() > 8.0f) {
-                            stop();
-                            ROS_WARN("旋转超时，强制停止");
-                            break;
-                        }
-                        
-                        // ========== 阶段1：纯旋转，不做平行检测 ==========
-                        if (abs_yaw < 60.0f * DEG_TO_RAD) {
-                            geometry_msgs::Twist cmd;
-                            cmd.linear.x = 0.0f;
-                            cmd.linear.y = pump_speed;
-                            cmd.angular.z = 0.25f;
-                            cmd_vel_pub_.publish(cmd);
-                            ros::Duration(0.05).sleep();
-                            continue;
-                        }
-                        
-                        // ========== 阶段2：超过60度，启用平行检测 ==========
-                        if (!parallel_check_enabled) {
-                            parallel_check_enabled = true;
-                            ROS_INFO("已转60°，启用平行度检测");
-                        }
-                        
-                        float front = wall_sensors_.ultra_right_front;
-                        float rear = wall_sensors_.ultra_right_rear;
-                        
-                        bool data_valid = (front > 0.05f && front < 5.0f && 
-                                           rear > 0.05f && rear < 5.0f);
-                        
-                        if (data_valid) {
-                            float parallel_error = rear - front;
-                            
-                            ROS_INFO_THROTTLE(0.3, "旋转对齐: 前=%.2f 后=%.2f 误差=%.2f 角度=%.1f°", 
-                                            front, rear, parallel_error, abs_yaw * RAD_TO_DEG);
-                            
-                            if (fabs(parallel_error) < 0.02f) {
-                                stop();
-                                ROS_INFO("平行度达标，停止旋转 (转过%.1f°)", abs_yaw * RAD_TO_DEG);
-                                break;
-                            }
-                            
-                            float angular_speed = (fabs(parallel_error) < 0.1f) ? 0.08f : 0.15f;
-                            geometry_msgs::Twist cmd;
-                            cmd.linear.x = 0.0f;
-                            cmd.linear.y = pump_speed;
-                            cmd.angular.z = angular_speed;
-                            cmd_vel_pub_.publish(cmd);
-                        } else {
-                            // 无有效数据，继续旋转并用角度兜底
-                            if (abs_yaw > 88.0f * DEG_TO_RAD) {
-                                stop();
-                                ROS_WARN("兜底：累积转到88°停止");
-                                break;
-                            }
-                            
-                            geometry_msgs::Twist cmd;
-                            cmd.linear.x = 0.0f;
-                            cmd.linear.y = pump_speed;
-                            cmd.angular.z = 0.15f;
-                            cmd_vel_pub_.publish(cmd);
-                        }
-                        
-                        ros::Duration(0.05).sleep();
-                    }
-                    
-                    ros::Duration(0.3).sleep();
-                    
-                    // ----- 3. 平行度对齐 -----
-                    ROS_INFO("右侧平行度对齐");
-                    alignToRightWallOnly();
-                    ros::Duration(0.3).sleep();
-                    
-                    // ----- 4. 重置状态（不重置累积路程）-----
-                    total_yaw_change = 0.0f;
-                    last_theta = current_pose_.theta;
-                    start_time = ros::Time::now();
-                    wall_avoiding = false;
-                    front_wall_detect_count = 0;
-                    correction_enabled = false;
-                    correction_start_time = ros::Time::now();
-                    current_angular_correction = 0.0f;
-                    
-                    // 恢复前进速度
-                    {
-                        std::lock_guard<std::mutex> lock(keyboard_mutex_);
-                        if (move_direction == 'w') {
-                            keyboard_sim_.target_vx = cmd_speed;
-                            keyboard_sim_.current_vx = cmd_speed;
-                        }
-                        keyboard_sim_.target_angular = 0.0f;
-                        keyboard_sim_.idle_counter = 0;
-                        keyboard_sim_.key_pressed = true;
-                    }
-                    
-                    ROS_INFO("避让完成，已走: %.2f米, 剩余: %.2f米, 当前角度: %.1f°", 
-                            total_accumulated_distance, remaining, current_pose_.theta * RAD_TO_DEG);
-                    continue;
-                }
-            } else {
-                front_wall_detect_count = 0;
-            }
-        }
-        
-        // ==================== 到达目标 ====================
-        if (remaining < 0.05f) {
-            stop();
-            success = true;
-            ROS_ERROR("✅ 行走完成！总路程: %.3f米", total_accumulated_distance);
-            break;
-        }
-        
-        // ==================== 减速区 ====================
-        float slow_down_dist = 0.4f;
-        float current_speed = cmd_speed;
-        if (remaining < slow_down_dist && remaining > 0) {
-            current_speed = cmd_speed * std::max(0.3f, remaining / slow_down_dist);
-        }
-        
-        // ==================== 提前关泵 ====================
-        if (pump_on && !pump_closed_early && remaining < 0.3f && remaining > 0) {
-            pump_on = false;
-            pump_closed_early = true;
-            config_pump_speed_ = 0.0f;
-            ROS_INFO("快到目的地，水泵已关闭");
-        }
-        
-        // ==================== 角度纠偏 ====================
-        float relative_theta = total_yaw_change;
-        
-        // 行走2秒后开始启用纠偏
-        if (!correction_enabled && (ros::Time::now() - correction_start_time).toSec() > 2.0) {
-            correction_enabled = true;
-            ROS_WARN("启动连续按键纠偏, 当前累积偏角=%.1f°", relative_theta * RAD_TO_DEG);
-        }
-        
-        if (correction_enabled && !wall_avoiding) {
-            // 每秒更新一次角速度
-            if ((ros::Time::now() - last_correction_time).toSec() > 0.8) {
-                if (move_direction == 'w') {
-                    if (relative_theta < -0.03f) {
-                        current_angular_correction = 0.20f;
-                        ROS_WARN_THROTTLE(1.0, "→ 向右偏 %.1f°，左转", 
-                                          -relative_theta * RAD_TO_DEG);
-                    }
-                    else if (relative_theta > 0.03f) {
-                        current_angular_correction = -0.20f;
-                        ROS_WARN_THROTTLE(1.0, "→ 向左偏 %.1f°，右转", 
-                                          relative_theta * RAD_TO_DEG);
-                    }
-                    else {
-                        current_angular_correction = 0.0f;
-                    }
-                }
-                else {
-                    float actual_error = -relative_theta;
-                    if (actual_error < -0.03f) {
-                        current_angular_correction = -0.20f;
-                    } else if (actual_error > 0.03f) {
-                        current_angular_correction = 0.20f;
-                    } else {
-                        current_angular_correction = 0.0f;
-                    }
-                }
-                last_correction_time = ros::Time::now();
-            }
-        }
-        
-        // 小角度时逐渐减小角速度，避免过冲
-        if (fabs(relative_theta) < 0.05f && fabs(current_angular_correction) > 0.05f) {
-            current_angular_correction *= 0.5f;
-        }
-        
-        // ========== 发送移动命令 ==========
-        geometry_msgs::Twist cmd;
-        cmd.linear.x = (move_direction == 'w') ? current_speed : -current_speed;
-        cmd.linear.y = pump_on ? pump_speed : 0.0f;
-        cmd.angular.z = current_angular_correction;
-        cmd_vel_pub_.publish(cmd);
-        
-        // 进度打印
-        static ros::Time last_print = ros::Time::now();
-        if ((ros::Time::now() - last_print).toSec() > 1.0) {
-            float progress = (total_accumulated_distance / total_target) * 100.0f;
-            ROS_INFO("进度: %.1f%%, 已走%.2f/%.2f米, 偏角:%.1f°", 
-                     progress, total_accumulated_distance, total_target, relative_theta * RAD_TO_DEG);
-            last_print = ros::Time::now();
-        }
-        
-        ros::spinOnce();
-        ros::Duration(0.05).sleep();
-    }
-    
-    // ==================== 结束处理 ====================
-    stop();
-    if (pump_on) {
-        geometry_msgs::Twist cmd;
-        cmd.linear.x = 0.0f;
-        cmd.linear.y = 0.0f;
-        cmd.angular.z = 0.0f;
-        cmd_vel_pub_.publish(cmd);
-        config_pump_speed_ = 0.0f;
-    }
-    
-    // 最终停止后平行度对齐
-    ROS_INFO("最终停止后平行度对齐");
-    alignToRightWallOnly();
-    ros::Duration(0.3).sleep();
-    
-    disabling_timer_ = false;
-    move_state_ = success ? 0 : 2;
-     // ========== 保存行走日志 ==========
-    saveWalkLog(success);
-    return success;
-}
-****/
 
 bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float max_speed, float timeout) {
     if (move_state_ != 0) {
@@ -884,13 +196,12 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     
     const float DEG_TO_RAD = M_PI / 180.0f;
     const float RAD_TO_DEG = 180.0f / M_PI;
-    const float SPEED_CALIBRATION = 0.985f;
-    
+
     float total_target = fabs(distance);
     char move_direction = (distance >= 0) ? 'w' : 'x';
-    float desired_speed = std::min(max_speed, 0.35f);
-    float cmd_speed = desired_speed / SPEED_CALIBRATION;
-    cmd_speed = 0.35f;
+    // 速度: 用传入 max_speed(=ROS参数 speed, 默认0.25), 夹到安全上限 config_speed_max_(默认0.30, 防履带打滑)
+    // 修正原 doc/main 把 cmd_speed 写死 0.35(忽略参数, 且 >打滑临界~0.27 → 侧滑): 现可调且限幅
+    float cmd_speed = std::min(std::max(max_speed, 0.0f), config_speed_max_);
     
     // 清除键盘模拟器状态
     {
@@ -933,7 +244,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     bool pump_on = (pump_speed > 0.01f);
     if (pump_on) {
         geometry_msgs::Twist pump_cmd;
-        pump_cmd.linear.x = cmd_speed;
+        pump_cmd.linear.x = 0.0f;   // 缓启动: 起泵阶段不前冲, 前进速度由主循环斜坡渐起
         pump_cmd.linear.y = pump_speed;
         pump_cmd.angular.z = 0.0f;
         cmd_vel_pub_.publish(pump_cmd);
@@ -956,7 +267,15 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     bool correction_enabled = false;
     ros::Time last_correction_time = ros::Time::now();
     float current_angular_correction = 0.0f;
-    
+
+    // 串级直行: 锁定 IMU 航向基准 yaw_base(=当前/imu_heading; 段首与每次拐角对齐后重锁) + 复位内环 PD
+    double yaw_base = hs_have_yaw_ ? hs_yaw_rad_ : 0.0;
+    hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
+    hs_t_prev_sample_ = hs_have_yaw_ ? hs_yaw_stamp_ : ros::Time::now();
+    hs_new_sample_ = false;
+    // 缓启动斜坡起点(起步; 每次拐角恢复后重置)
+    ros::Time ramp_start_time = ros::Time::now();
+
     // ========== 设置目标速度 ==========
     {
         std::lock_guard<std::mutex> lock(keyboard_mutex_);
@@ -1182,7 +501,13 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                     correction_enabled = false;
                     correction_start_time = ros::Time::now();
                     current_angular_correction = 0.0f;
-                    
+                    // 串级: 拐角对齐后(已平行于新墙)重锁 IMU 航向基准 + 复位内环 PD + 重置缓启动斜坡
+                    yaw_base = hs_have_yaw_ ? hs_yaw_rad_ : yaw_base;
+                    hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
+                    hs_t_prev_sample_ = hs_have_yaw_ ? hs_yaw_stamp_ : ros::Time::now();
+                    hs_new_sample_ = false;
+                    ramp_start_time = ros::Time::now();
+
                     // 恢复前进速度
                     {
                         std::lock_guard<std::mutex> lock(keyboard_mutex_);
@@ -1212,13 +537,20 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             break;
         }
         
-        // ==================== 减速区 ====================
-        float slow_down_dist = 0.4f;
+        // ==================== 速度: 缓启动斜坡(起步/拐角后) ∩ 到点减速区 ====================
         float current_speed = cmd_speed;
-        if (remaining < slow_down_dist && remaining > 0) {
-            current_speed = cmd_speed * std::max(0.3f, remaining / slow_down_dist);
+        // 缓启动: 起步与每次拐角恢复后, 速度在 softstart_sec 内线性 0→cmd_speed(消除起步瞬跳引起的侧偏)
+        if (config_softstart_sec_ > 0.01f) {
+            float ramp_t = (ros::Time::now() - ramp_start_time).toSec();
+            float ramp = std::min(1.0f, std::max(0.0f, ramp_t / config_softstart_sec_));
+            current_speed *= ramp;
         }
-        
+        // 到点减速区(取更小者)
+        float slow_down_dist = 0.4f;
+        if (remaining < slow_down_dist && remaining > 0) {
+            current_speed = std::min(current_speed, cmd_speed * std::max(0.3f, remaining / slow_down_dist));
+        }
+
         // ==================== 提前关泵 ====================
         if (pump_on && !pump_closed_early && remaining < 0.3f && remaining > 0) {
             pump_on = false;
@@ -1227,29 +559,22 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             ROS_INFO("快到目的地，水泵已关闭");
         }
         
-        // ==================== 沿墙纠偏：距墙距离环 + 平行环(超声为主、odom兜底) ====================
-        // 修复①：引入"距墙距离"控制环(config_wall_align_=目标距,默认2m)，给横向位置回正力
-        // 修复②③：不再把拐弯后 odom 当"直"的零基准；超声有效时持续把 odom 参考归零，
-        //          odom 仅在丢墙时短时兜底保航向
-        float relative_theta = total_yaw_change;  // 仅用于丢墙兜底/日志
+        // ==================== 沿墙纠偏：串级(IMU航向内环 + 超声距墙外环) ====================
+        // 内环: /imu_heading(融合航向, 0614实测好的直行PD)守住航向基准 yaw_base(段首/拐角对齐后锁定)。
+        // 外环: 右侧超声"新鲜且有效"时, 把 距墙误差e_dist + 平行误差e_par 折成有界航向偏置 C
+        //       (同 doc 分支号: 太近/朝墙→正→左转远离), 叠到航向误差上; 丢墙时 C=0 → 纯 IMU 守 yaw_base(直行)。
+        // 退化: /imu_heading 不可用/陈旧(老驱动或掉线) → 回退 doc 分支原逻辑(超声直接出角速度 + odom兜底)。
+        // 增益为 cmd 单位, 实际角速度 = cmd ×6.4 (见驱动 hardware_driver.cpp); 现场按 CSV(e_head/d/e_par/u) 整定。
+        float relative_theta = total_yaw_change;  // odom 兜底/日志用
 
         if (!correction_enabled && (ros::Time::now() - correction_start_time).toSec() > 2.0) {
             correction_enabled = true;
-            ROS_WARN("启动沿墙纠偏");
+            ROS_WARN("启动沿墙纠偏(串级)");
         }
 
         if (correction_enabled && !wall_avoiding) {
-            // 增益为 cmd 单位，实际角速度 = cmd ×6.4 (见驱动 hardware_driver.cpp)；需现场按日志整定
-            const float K_DIST = 0.03f;        // 距墙误差→角速度 (cmd/m) 经离线扫参:0.83Hz超声下稳定收敛
-            const float K_PAR  = 0.30f;        // 平行误差→角速度 (cmd/m)
-            const float MAX_CORR = 0.08f;      // 沿墙纠偏限幅 (cmd; ×6.4≈0.51 rad/s)
-            const float K_ODOM_HOLD = 1.0f;    // 丢墙时 odom 保航向增益 (cmd/rad)
-            const float MAX_ODOM_CORR = 0.10f;
-            const float STALE_SEC = config_wall_stale_sec_;  // 右侧超声陈旧看门狗(s)，ROS 参数 wall_stale_sec(默认1.5、夹[0.5,5.0])。
-                                               // 默认 1.5 配 D-41 驱动右侧 ~3.3Hz(0.3s/路)≈5×周期：丢回波时盲走从 ~1m(旧3s)压到 ~0.5m(0.35m/s)。
-                                               // ⚠ 须≥右侧刷新周期：驱动 ultra_poll_period 调大或回退旧 1.2s/路时，须把 wall_stale_sec 同步上调，否则超声环↔odom兜底抖动
-
-            // 快照右侧超声(加锁，修复原裸读竞态) + 新鲜度
+            // 快照右侧超声(加锁) + 新鲜度; IMU 航向同线程读, 无需锁
+            // 陈旧看门狗 config_wall_stale_sec_(ROS 参数 wall_stale_sec): 须≥右侧刷新周期, 随驱动 ultra_poll_period 调
             float front, rear; ros::Time ultra_stamp;
             {
                 std::lock_guard<std::mutex> lk(sensor_mutex_);
@@ -1259,37 +584,86 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             }
             bool front_valid = (front > 0.05f && front < 5.0f);
             bool rear_valid  = (rear  > 0.05f && rear  < 5.0f);
-            bool fresh = (!ultra_stamp.isZero() &&
-                          (ros::Time::now() - ultra_stamp).toSec() < STALE_SEC);
+            bool ultra_fresh = (!ultra_stamp.isZero() &&
+                                (ros::Time::now() - ultra_stamp).toSec() < config_wall_stale_sec_);
+            bool ultra_ok = front_valid && rear_valid && ultra_fresh;
+            bool imu_fresh = (hs_have_yaw_ &&
+                              (ros::Time::now() - hs_yaw_stamp_).toSec() < config_heading_yaw_timeout_);
 
-            float angular_cmd = 0.0f;
-            if (front_valid && rear_valid && fresh) {
-                // —— 超声为主：距墙距离环 + 平行环 ——
-                float d = 0.5f * (front + rear);            // 距右墙
-                float e_par = rear - front;                 // >0:机头朝墙
-                float e_dist = config_wall_align_ - d;      // >0:离墙太近
-                angular_cmd = K_DIST * e_dist + K_PAR * e_par;  // 太近/朝墙→左转(+)远离
-                angular_cmd = std::max(-MAX_CORR, std::min(MAX_CORR, angular_cmd));
-                // 超声有效→归零 odom 参考：丢墙兜底时保持的是当前(超声建立的)航向，而非拐弯遗留错航向
-                total_yaw_change = 0.0f;
-                last_theta = current_pose_.theta;
-                ROS_INFO_THROTTLE(1.0, "沿墙: d=%.2f(目标%.2f) e_par=%.3f -> w=%.3f",
-                                  d, config_wall_align_, e_par, angular_cmd);
+            // ---- 外环: 距墙/平行 → 有界航向偏置 C(误差单位; 仅新鲜有效超声时刷新) ----
+            float d = -1.0f, e_par = 0.0f, C = 0.0f;
+            if (ultra_ok) {
+                d = 0.5f * (front + rear);              // 距右墙
+                e_par = rear - front;                   // >0:机头朝墙(欠转)
+                float e_dist = config_wall_align_ - d;  // >0:离墙太近→需离墙
+                C = (float)config_wall_k_dist_ * e_dist + (float)config_wall_k_par_ * e_par;
+                C = std::max(-(float)config_wall_off_max_, std::min((float)config_wall_off_max_, C));
             } else if (front_valid != rear_valid) {
-                // —— 仅一侧有墙：按既有约定轻纠以重捕获 ——
-                angular_cmd = rear_valid ? -0.05f : 0.05f;  // 右前丢→右转(-); 右后丢→左转(+)
-                // 仍贴墙：刷新 odom 基准，保证后续丢墙兜底以当前航向为零点
-                total_yaw_change = 0.0f;
-                last_theta = current_pose_.theta;
-                ROS_WARN_THROTTLE(1.0, "单侧超声(前%.2f/后%.2f)，轻纠 w=%.3f", front, rear, angular_cmd);
-            } else {
-                // —— 两侧无效/陈旧：odom 短时兜底保航向 ——
-                angular_cmd = -K_ODOM_HOLD * relative_theta;
-                angular_cmd = std::max(-MAX_ODOM_CORR, std::min(MAX_ODOM_CORR, angular_cmd));
-                ROS_WARN_THROTTLE(1.0, "右侧超声无效/陈旧，odom兜底 偏角=%.1f° w=%.3f",
-                                  relative_theta * RAD_TO_DEG, angular_cmd);
+                C = rear_valid ? -0.05f : 0.05f;        // 单侧有墙: 轻偏重捕获(右前丢→右转(-); 右后丢→左转(+))
             }
-            current_angular_correction = angular_cmd;
+
+            if (imu_fresh) {
+                // ======== 内环: 0614 实测好的航向 PD(误差 = IMU航向偏差 + 外环偏置C) ========
+                double e_head = (double)config_heading_sign_ *
+                                (double)normalizeAngle((float)(hs_yaw_rad_ - yaw_base));
+                // 微分: 仅新 IMU 样本上、按样本 dt、一阶低通(tau_d); 只对航向求导, 不含慢变 C
+                if (hs_new_sample_) {
+                    hs_new_sample_ = false;
+                    double dts = (hs_yaw_stamp_ - hs_t_prev_sample_).toSec();
+                    if (dts < 0.005) dts = 0.005;
+                    if (dts > 0.5)   dts = 0.5;
+                    double raw_d = (double)normalizeAngle((float)(e_head - hs_e_prev_)) / dts;
+                    double alpha = dts / (config_heading_tau_d_ + dts);
+                    hs_d_filt_ += alpha * (raw_d - hs_d_filt_);
+                    hs_e_prev_ = e_head;
+                    hs_t_prev_sample_ = hs_yaw_stamp_;
+                }
+                double e_total = e_head + (double)C;    // 外环偏置进入误差(串级)
+                double u_unsat = config_heading_kp_ * e_total
+                               + config_heading_kd_ * hs_d_filt_ + hs_I_;
+                // 条件抗饱和: 仅对航向稳态(e_head)积分, 不积分 C(否则会抵消距墙环)
+                if (fabs(u_unsat) < config_heading_omega_limit_) {
+                    hs_I_ += config_heading_ki_ * e_head * 0.05;   // loop dt≈0.05s(20Hz)
+                    if (hs_I_ >  config_heading_i_clamp_) hs_I_ =  config_heading_i_clamp_;
+                    if (hs_I_ < -config_heading_i_clamp_) hs_I_ = -config_heading_i_clamp_;
+                }
+                double u = u_unsat;
+                if (u >  config_heading_omega_limit_) u =  config_heading_omega_limit_;
+                if (u < -config_heading_omega_limit_) u = -config_heading_omega_limit_;
+                current_angular_correction = (float)u;
+
+                // 贴墙时保持 odom 兜底零点新鲜(以当前已对齐航向为零), 以防 IMU 后续掉线退化时航向错
+                if (ultra_ok || (front_valid != rear_valid)) {
+                    total_yaw_change = 0.0f; last_theta = current_pose_.theta;
+                }
+
+                dbg_imu_yaw_deg_  = (float)(hs_yaw_rad_ * RAD_TO_DEG);
+                dbg_yaw_base_deg_ = (float)(yaw_base * RAD_TO_DEG);
+                dbg_e_head_deg_   = (float)(e_head * RAD_TO_DEG);
+                dbg_wall_d_ = d; dbg_e_par_ = e_par; dbg_C_ = C; dbg_u_ = (float)u;
+                dbg_mode_ = ultra_ok ? 1 : 2;
+                ROS_INFO_THROTTLE(1.0,
+                    "沿墙(串级): d=%.2f e_par=%.3f C=%.3f | imu_e=%.1fdeg u=%.3f mode=%d",
+                    d, e_par, C, dbg_e_head_deg_, dbg_u_, dbg_mode_);
+            } else {
+                // ======== 退化: /imu_heading 不可用 → doc 分支原逻辑(超声直接出角速度 + odom兜底) ========
+                const float K_ODOM_HOLD = 1.0f;
+                const float MAX_ODOM_CORR = 0.10f;
+                float angular_cmd;
+                if (ultra_ok || (front_valid != rear_valid)) {
+                    angular_cmd = std::max(-(float)config_wall_off_max_,
+                                           std::min((float)config_wall_off_max_, C));
+                    total_yaw_change = 0.0f; last_theta = current_pose_.theta;  // 贴墙→刷新odom零点
+                } else {
+                    angular_cmd = -K_ODOM_HOLD * relative_theta;
+                    angular_cmd = std::max(-MAX_ODOM_CORR, std::min(MAX_ODOM_CORR, angular_cmd));
+                }
+                current_angular_correction = angular_cmd;
+                dbg_imu_yaw_deg_ = 0.0f; dbg_yaw_base_deg_ = 0.0f; dbg_e_head_deg_ = 0.0f;
+                dbg_wall_d_ = d; dbg_e_par_ = e_par; dbg_C_ = C; dbg_u_ = angular_cmd; dbg_mode_ = 0;
+                ROS_WARN_THROTTLE(1.0, "沿墙(IMU不可用→退化): u=%.3f (odom偏角=%.1f°)",
+                                  angular_cmd, relative_theta * RAD_TO_DEG);
+            }
         }
         
         // ========== 发送移动命令 ==========
@@ -1333,102 +707,6 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     return success;
 }
 // ==================== 右侧平行度对齐 ====================
-/***********
-void MoveController::alignToRightWallOnly() {
-    const float TOLERANCE = 0.02f;  // 降低阈值
-    ros::Time start_time = ros::Time::now();
-    const float SENSOR_SPACING = 0.14f;
-    const float KP = 1.5f;          // 比例增益
-    const float MAX_SPEED = 0.2f;   // 最大角速度
-    
-    ROS_INFO("开始平行度对齐（修正版）");
-    
-    // 辅助函数：判断超声波数据是否有效
-    auto isValid = [](float dist) -> bool {
-        return (dist > 0.05f && dist < 5.0f);
-    };
-    
-    while (ros::ok()) {
-        if ((ros::Time::now() - start_time).toSec() > 10.0f) {
-            ROS_WARN("平行度对齐超时");
-            break;
-        }
-        
-        updateCurrentPose();
-        
-        float front = wall_sensors_.ultra_right_front;
-        float rear = wall_sensors_.ultra_right_rear;
-        
-        bool front_valid = isValid(front);
-        bool rear_valid = isValid(rear);
-        
-        // 数据无效处理
-        if (!front_valid && !rear_valid) {
-            ROS_WARN_THROTTLE(1.0, "两个超声波都无效，可能远离池壁");
-            ros::Duration(0.1).sleep();
-            ros::spinOnce();
-            continue;
-        }
-        
-        if (!front_valid && rear_valid) {
-            // 偏左 → 右转
-            ROS_WARN_THROTTLE(1.0, "偏左（右前无效），右转纠正");
-            geometry_msgs::Twist cmd;
-            cmd.linear.x = 0.0f;
-            cmd.linear.y = config_pump_speed_;
-            cmd.angular.z = -0.12f;
-            cmd_vel_pub_.publish(cmd);
-            ros::Duration(0.05).sleep();
-            ros::spinOnce();
-            continue;
-        }
-        
-        if (front_valid && !rear_valid) {
-            // 偏右 → 左转
-            ROS_WARN_THROTTLE(1.0, "偏右（右后无效），左转纠正");
-            geometry_msgs::Twist cmd;
-            cmd.linear.x = 0.0f;
-            cmd.linear.y = config_pump_speed_;
-            cmd.angular.z = 0.12f;
-            cmd_vel_pub_.publish(cmd);
-            ros::Duration(0.05).sleep();
-            ros::spinOnce();
-            continue;
-        }
-        
-        // 两个都有效，使用PID控制
-        float diff = rear - front;
-        
-        // ========== 关键修正：纠正方向 ==========
-        // diff > 0 (后远前近) → 机头朝右 → 需要左转 → 正角速度
-        // diff < 0 (后近前远) → 机头朝左 → 需要右转 → 负角速度
-        float angular_speed = 0.0f;
-        
-        if (fabs(diff) < 0.02f) {
-            stop();
-            ROS_INFO("平行度对齐完成 (前后差=%.3fm)", diff);
-            break;
-        }
-        
-        angular_speed = diff * KP;
-        angular_speed = std::max(-MAX_SPEED, std::min(MAX_SPEED, angular_speed));
-        
-        ROS_INFO_THROTTLE(0.5, "对齐: 前=%.3f, 后=%.3f, 差=%.3fm, 角速度=%.2f", 
-                         front, rear, diff, angular_speed);
-        
-        geometry_msgs::Twist cmd;
-        cmd.linear.x = 0.0f;
-        cmd.linear.y = config_pump_speed_;
-        cmd.angular.z = angular_speed;
-        cmd_vel_pub_.publish(cmd);
-        
-        ros::Duration(0.05).sleep();
-        ros::spinOnce();
-    }
-    
-    stop();
-}
-*********/
  
 void MoveController::alignToRightWallOnly() {
     const float TOLERANCE = 0.035f;  // 放宽容差到3.5cm
@@ -1778,6 +1056,15 @@ void MoveController::ultraCallback(const std_msgs::Int32MultiArray::ConstPtr& ms
     }
 }
 
+void MoveController::imuHeadingCallback(const std_msgs::Float32::ConstPtr& msg) {
+    // /imu_heading = IMU 融合航向(度, D-19 取 imu_encoder.roll 轴, 由 mars_serial_server 驱动发布)。
+    // 与主循环 spinOnce 同线程执行, 无需加锁。无 header 时间戳 → 用到达时刻作样本时间(用于微分 dt)。
+    hs_yaw_rad_    = (double)msg->data * (double)DEG_TO_RAD;
+    hs_yaw_stamp_  = ros::Time::now();
+    hs_have_yaw_   = true;
+    hs_new_sample_ = true;
+}
+
 // ==================== 辅助函数 ====================
 void MoveController::updateCurrentPose() {
     std::lock_guard<std::mutex> lock(keyboard_mutex_);
@@ -1897,7 +1184,8 @@ void MoveController::initWalkLog(const std::string& log_type, float target_dista
     
     if (walk_log_file_.is_open()) {
         walk_log_file_ << "elapsed_sec,right_front_m,right_rear_m,infra_left_m,infra_right_m,"
-                       << "pose_x_m,pose_y_m,pose_theta_deg,target_distance_m,current_distance_m,status\n";
+                       << "pose_x_m,pose_y_m,pose_theta_deg,target_distance_m,current_distance_m,"
+                       << "imu_yaw_deg,yaw_base_deg,e_head_deg,wall_d_m,e_par_m,ctrl_C,ctrl_u,ctrl_mode,status\n";
         walk_log_file_.flush();
         ROS_INFO("MoveController行走日志已创建: %s", current_log_filename_.c_str());
     } else {
@@ -1931,7 +1219,16 @@ void MoveController::recordWalkData(float current_distance, float target_distanc
     data.pose_theta = current_pose_.theta;
     data.target_distance = target_distance;
     data.current_distance = current_distance;
-    
+    // 串级调参快照(主循环每拍更新)
+    data.imu_yaw_deg  = dbg_imu_yaw_deg_;
+    data.yaw_base_deg = dbg_yaw_base_deg_;
+    data.e_head_deg   = dbg_e_head_deg_;
+    data.wall_d       = dbg_wall_d_;
+    data.e_par        = dbg_e_par_;
+    data.ctrl_C       = dbg_C_;
+    data.ctrl_u       = dbg_u_;
+    data.ctrl_mode    = dbg_mode_;
+
     log_buffer_.push_back(data);
     last_log_time_ = now;
 }
@@ -1957,6 +1254,14 @@ void MoveController::saveWalkLog(bool success) {
                        << data.pose_theta * RAD_TO_DEG << ","
                        << data.target_distance << ","
                        << data.current_distance << ","
+                       << data.imu_yaw_deg << ","
+                       << data.yaw_base_deg << ","
+                       << data.e_head_deg << ","
+                       << data.wall_d << ","
+                       << data.e_par << ","
+                       << data.ctrl_C << ","
+                       << data.ctrl_u << ","
+                       << data.ctrl_mode << ","
                        << (success ? "SUCCESS" : "FAILED") << "\n";
     }
     
