@@ -239,6 +239,8 @@ private:
     double config_wall_k_dist_         = 0.20;  // 距墙误差→航向偏置 (rad/m); 超声实测 10Hz(非旧推断0.83Hz)→比旧0.03激进, off_max 兜底
     double config_wall_k_par_          = 0.60;  // 平行误差→航向偏置 (rad/m)
     double config_wall_off_max_        = 0.10;  // 外环航向偏置限幅(rad≈5.7°); 距墙环安全上界, 限制最大转向激进度
+    // ⚠ 稳定性依赖右前/右后纵向基距 L: 特征根过阻尼需 L<1/k_par≈1.67m(k_par=0.6)。Orange Pi 小车 L<1m 必满足、安全;
+    //   若换大车/调大 k_par, 须复核 L。另: off_max=0.10 使 |d-target|>0.5m 时外环按限幅 slew(开环段), 仿真"44s收敛"假定起步已近目标。
     float  config_speed_max_           = 0.30f; // 前进速度安全上限(防履带打滑临界~0.27)
     float  config_softstart_sec_       = 1.5f;  // 缓启动斜坡(s): 起步/拐角后速度在此时长内线性 0→目标
 

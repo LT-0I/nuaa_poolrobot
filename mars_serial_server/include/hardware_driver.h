@@ -304,8 +304,11 @@ private:
     int   ultra_hist_n_[4];       // 已积累有效样本数(<3 未满)
     int   ultra_last_valid_[4];   // 最近有效输出(短暂丢失时保持)
     int   ultra_invalid_cnt_[4];  // 连续无效计数(超 ultra_hold_max_ → 输出 OOR 哨兵 65533, 让消费侧 stale 逻辑接管)
-    int   ultra_min_valid_mm_;    // 有效下限(盲区, 默认 30)
-    int   ultra_max_valid_mm_;    // 有效上限(量程, 默认 6000; 实测水下~5m, >此或==65533 即 OOR)
+    int   ultra_min_valid_mm_;    // 有效下限(盲区, 默认 50, 对齐消费侧 0.05m 门)
+    int   ultra_max_valid_mm_;    // 有效上限(量程, 默认 5000=水下~5m, 对齐消费侧 5.0m 门; >此或==65533 即 OOR)
+    // 2000 的含义(用户 2026-06-14 确认): 2000 = 真实 2m, 保留为有效。
+    //   ⚠ 旧逻辑曾把 OOR(65533)等并记为 2000(掩盖"无回波"为假2m墙); 现驱动哨兵已禁用→OOR 原样 65533(本滤波拒之)。
+    //   故 g2a_map 旧数据里 data1/data2 的 2000 无噪声平台, 在新管线中应显为 65533(真无回波)→被滤波吐哨兵→消费侧退化, 不再假装有2m墙。
     int   ultra_hold_max_;        // 丢失保持最多帧数(默认 5≈0.5s@10Hz), 超则吐 65533
 
     int   update_nums;

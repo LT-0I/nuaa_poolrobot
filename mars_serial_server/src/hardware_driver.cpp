@@ -86,7 +86,7 @@ HardwareDriver::HardwareDriver(CallbackAsyncSerial *serial)
     // cap.set(CAP_PROP_FRAME_HEIGHT,1280);
     dist_datas.data.resize(4);
     // 超声滤波状态初始化(默认值; rosNode() 中可被 ROS 参数覆盖)。起始置 OOR 哨兵=首帧前消费侧判"无数据"。
-    ultra_min_valid_mm_ = 30; ultra_max_valid_mm_ = 6000; ultra_hold_max_ = 5;
+    ultra_min_valid_mm_ = 50; ultra_max_valid_mm_ = 5000; ultra_hold_max_ = 5;  // 对齐消费侧 [0.05,5.0]m 门
     for (int i = 0; i < 4; i++) {
         ultra_hist_n_[i]     = 0;
         ultra_invalid_cnt_[i]= ultra_hold_max_ + 1;
@@ -209,6 +209,7 @@ void HardwareDriver::rosNode()
     if (ultra_poll_period < 0.05) ultra_poll_period = 0.05;
     if (ultra_poll_period > 0.5)  ultra_poll_period = 0.5;
     // 超声滤波参数(全局 ROS 参数; 成员 nh_ 为全局命名空间→启动前 rosparam set /ultra_max_valid_mm X 覆盖, 不能用 _x:=)
+    // 注: 这三个标量在此(rosNode线程)写一次、之后只被 RX 线程读; 构造函数已给安全默认(50/5000/5)→启动瞬态竞态良性(读到旧默认也安全)。
     nh_.param("ultra_min_valid_mm", ultra_min_valid_mm_, ultra_min_valid_mm_);
     nh_.param("ultra_max_valid_mm", ultra_max_valid_mm_, ultra_max_valid_mm_);
     nh_.param("ultra_hold_max",     ultra_hold_max_,     ultra_hold_max_);
@@ -592,8 +593,9 @@ int HardwareDriver::filterUltra(int idx, int raw_mm)
 
 void HardwareDriver::UpdateUltra()
 {
-    // cout << "dist_datas " << dist_datas.data[0] <<  " " << dist_datas.data[1] << " " << dist_datas.data[2] << endl;
-     // 过滤异常值 65533
+    // ⚠ 已知预存竞态(非本轮引入): dist_datas 在 RX 线程写、此处主循环读, 无锁(同 D-29 类)。本轮 filterUltra 未扩大并发面;
+    //   彻底解决并入 D-29 硬件驱动整体重写(参照 encoder_mutex 模式或快照)。
+     // 过滤异常值 65533(>10000 或 65533 = OOR; 哨兵改写已禁用, 仅 WARN, 原值透传交消费侧有效窗剔除)
     std_msgs::Int32MultiArray safe_data = dist_datas;
     
     for (size_t i = 0; i < safe_data.data.size(); i++) {
@@ -1972,11 +1974,9 @@ void HardwareDriver::sendUltraCommand(){
 
     // 物理映射(以 move_controller 消费侧为准，用户 2026-06-13 定)：
     //   command/id 1 -> data[0]=前左, 2 -> data[1]=前右, 3 -> data[2]=右前, 4 -> data[3]=右后
-    //   (原注释把 1/2 标成"右侧"、3/4 标成"前方红外"系笔误，已订正)
-    // 右侧(3,4)=沿墙距离环的连续控制输入 -> 多分配请求；前方(1,2)=前障检测 -> 少分配。
-    // 6 拍右侧优先调度 [3,4,1,3,4,2]：配合 0.1s 周期(MCU 上限~10帧/秒)
-    //   -> 右前/右后各 ~3.3Hz(每3拍/0.3s)、前左/前右各 ~1.67Hz(每6拍/0.6s)。
-    // 前障带宽足够：1.5m 处检出、0.35m/s 下到接触约 4.3s，1.67Hz 给 ~7 帧新值。
+    // ⚠ 2026-06-14 实测(g2a_map CSV)定谳: MCU 自主推流 4 路各 ~10Hz, 与本函数请求无关——
+    //   这些请求【不门控刷新率】(部署轮询 0.3s 仍得 10Hz/路)。早先 D-41"右侧优先调度→3.3/1.67Hz"已被推翻。
+    //   保留请求仅作兼容/潜在保活, 调度顺序无实质影响(可视为 vestigial)。真正"获取优化"在 RX 侧 filterUltra。
     static const uint8_t ultra_schedule[6] = {3, 4, 1, 3, 4, 2};
     static int ultra_counter = 0;  // 单线程 ros::spin() 下无竞态；若改 AsyncSpinner 需加锁
     uint8_t ultra_command = ultra_schedule[ultra_counter];

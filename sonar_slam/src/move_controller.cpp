@@ -1055,12 +1055,14 @@ void MoveController::ultraCallback(const std_msgs::Int32MultiArray::ConstPtr& ms
     std::lock_guard<std::mutex> lock(sensor_mutex_);
     
     if (msg->data.size() >= 4) {
-        // 新鲜度：右侧任一原始值变化即视为收到新帧(每通道真实 ~0.83Hz)
+        // 新鲜度看门狗(陈旧判定用): 每次收到 /ultra_data(话题稳定 ~20Hz 转发、底层 MCU 推流 ~10Hz)即更新时间戳,
+        //   与原始值是否变化【解耦】。否则平直墙面下真实距离恒定(可数秒不变)会被误判 stale → 退 odom 盲走(评审 HIGH-1 实测 7×误回退)。
+        ultra_right_stamp_ = ros::Time::now();
+        // seq(拐角 stop-and-settle 用): 仅在右侧原始值真变化时推进, 避免对 ZOH 重复值重复精修(拐角旋转时值必变, 不受影响)。
         int raw_rf = msg->data[2];
         int raw_rr = msg->data[3];
         if (raw_rf != last_ultra_raw_rf_ || raw_rr != last_ultra_raw_rr_) {
             ultra_right_seq_++;
-            ultra_right_stamp_ = ros::Time::now();
             last_ultra_raw_rf_ = raw_rf;
             last_ultra_raw_rr_ = raw_rr;
         }
