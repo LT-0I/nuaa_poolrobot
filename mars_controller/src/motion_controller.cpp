@@ -237,7 +237,7 @@ void MotionController::rosNode()
                  h_kp_, h_kd_, h_ki_, h_i_clamp_, h_sign_);
         ROS_WARN("straight_speed=%.3f omega_limit=%.3f pump_speed=%.3f deadband_u=%.4f",
                  h_speed_, h_omega_limit_, h_pump_speed_, h_deadband_u_);
-        ROS_WARN("settle_seconds=%.1f still_max_pp_deg=%.3f", h_settle_s_, h_still_pp_deg_);
+        ROS_WARN("settle_seconds=%.1f still_max_pp_deg=%.3f softstart_seconds=%.2f", h_settle_s_, h_still_pp_deg_, h_softstart_s_);
         ROS_WARN("run_seconds=%.1f run_distance=%.2f", h_run_seconds_, h_run_distance_);
         ROS_WARN("pause_every_s=%.1f pause_duration_s=%.1f drift_comp=%d",
                  h_pause_every_s_, h_pause_duration_s_, (int)h_drift_comp_);
