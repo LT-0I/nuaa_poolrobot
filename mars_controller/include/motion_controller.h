@@ -325,6 +325,7 @@ private:
     double h_settle_s_ = 20.0, h_still_pp_deg_ = 0.5;
     double h_run_seconds_ = 60.0, h_run_distance_ = 0.0;
     double h_pause_every_s_ = 150.0, h_pause_duration_s_ = 4.0;
+    double h_softstart_s_ = 2.0;   // 缓启动斜坡(s): DRIVE 起步/暂停恢复后 linear.x 在此时长内 0->straight_speed, 消除起步瞬跳侧偏
     double h_yaw_timeout_ = 0.5, h_deadband_u_ = 0.0;
     int    h_sign_ = 1;
     bool   h_drift_comp_ = false;
@@ -351,7 +352,7 @@ private:
     double    hs_ls_t_ = 0.0, hs_ls_y_ = 0.0, hs_ls_tt_ = 0.0, hs_ls_ty_ = 0.0;  // 漂移最小二乘
     // DRIVE 距离/时间锚 + 暂停计时
     double    hs_x0_ = 0.0, hs_y0_ = 0.0;
-    ros::Time hs_drive_start_, hs_last_pause_;
+    ros::Time hs_drive_start_, hs_last_pause_, hs_ramp_start_;  // hs_ramp_start_: 缓启动斜坡起点
     std::ofstream hs_log_;
     bool      hs_log_open_ = false;
 };

@@ -187,6 +187,7 @@ void MotionController::rosNode()
     pnh_.param<double>("run_distance",      h_run_distance_,     0.0);
     pnh_.param<double>("pause_every_s",     h_pause_every_s_,    150.0);
     pnh_.param<double>("pause_duration_s",  h_pause_duration_s_, 4.0);
+    pnh_.param<double>("softstart_seconds", h_softstart_s_,      2.0);   // 缓启动斜坡(s); 0=关闭(瞬跳)
     pnh_.param<double>("yaw_timeout",       h_yaw_timeout_,      0.5);
     pnh_.param<double>("deadband_u",        h_deadband_u_,       0.0);
     pnh_.param<int>   ("heading_sign",      h_sign_,             1);
@@ -207,6 +208,8 @@ void MotionController::rosNode()
         if (h_omega_limit_ > 0.3) h_omega_limit_ = 0.3;
         if (h_pump_speed_  < 0.0) h_pump_speed_  = 0.0;   // 泵占空比钳 [0,1]
         if (h_pump_speed_  > 1.0) h_pump_speed_  = 1.0;
+        if (h_softstart_s_ < 0.0)  h_softstart_s_ = 0.0;  // 缓启动斜坡 [0,10]s
+        if (h_softstart_s_ > 10.0) h_softstart_s_ = 10.0;
         if (sp0 != h_speed_ || om0 != h_omega_limit_ || pm0 != h_pump_speed_)
             ROS_WARN("[hs] param out of range, clamped: straight_speed %.3f->%.3f, omega_limit %.3f->%.3f, pump_speed %.3f->%.3f",
                      sp0, h_speed_, om0, h_omega_limit_, pm0, h_pump_speed_);
@@ -1585,6 +1588,7 @@ void MotionController::RunHeadingStraight()
             hs_phase_start_   = now;
             hs_drive_start_   = now;
             hs_last_pause_    = now;
+            hs_ramp_start_    = now;   // 缓启动斜坡起点(起步)
             hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
             hs_t_prev_sample_ = now;
             hs_x0_ = wheel_pose_state.x; hs_y0_ = wheel_pose_state.y;
@@ -1630,6 +1634,7 @@ void MotionController::RunHeadingStraight()
     if (hs_phase_ == HS_PAUSE) {
         if ((now - hs_phase_start_).toSec() >= h_pause_duration_s_) {
             hs_phase_ = HS_DRIVE; hs_last_pause_ = now;
+            hs_ramp_start_ = now;   // 缓启动斜坡起点(暂停恢复后重新渐起, 因机器人已静止)
             // 恢复行驶：重置微分状态，避免暂停期间的姿态变化在 D 项上产生尖峰（评审 MEDIUM-1）。
             hs_d_filt_ = 0.0;
             hs_e_prev_ = (double)h_sign_ * wrapPi(hs_yaw_rad_ - hs_yaw0_);
@@ -1674,7 +1679,16 @@ void MotionController::RunHeadingStraight()
     if (u < -h_omega_limit_) u = -h_omega_limit_;
     if (h_deadband_u_ > 0.0 && fabs(u) < h_deadband_u_) u = 0.0;   // 仅 /autoVel_cmd 备用，默认 0 不动作
 
-    cmd.linear.x  = in_pause ? 0.0 : h_speed_;
+    // 缓启动斜坡: DRIVE 起步/暂停恢复后, linear.x 在 softstart_seconds 内线性 0->h_speed_。
+    // 只缓速度(前进)，不动航向环 u —— 消除起步瞬跳引起的侧偏(0.3 起步弯诊断), 不影响纠偏。
+    double hs_ramp = 1.0;
+    if (h_softstart_s_ > 1e-3) {
+        double rt = (now - hs_ramp_start_).toSec();
+        hs_ramp = rt / h_softstart_s_;
+        if (hs_ramp < 0.0) hs_ramp = 0.0;
+        if (hs_ramp > 1.0) hs_ramp = 1.0;
+    }
+    cmd.linear.x  = in_pause ? 0.0 : (h_speed_ * hs_ramp);
     // 泵(/cmd_vel linear.y=占空比)：仅"真正前进"时开——暂停 或 speed<=0(sign 测试) 一律关泵，防干转(陆地/原地)。
     // 默认 h_pump_speed_=0 → 陆地前进测试也不开泵；下水正式跑传 _pump_speed:=0.2。
     cmd.linear.y  = (in_pause || h_speed_ <= 0.0) ? 0.0 : h_pump_speed_;
