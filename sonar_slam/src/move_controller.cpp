@@ -111,6 +111,12 @@ MoveController::MoveController() :
     if (config_speed_max_           < 0.05f) config_speed_max_         = 0.05f;
     if (config_speed_max_           > 0.35f) config_speed_max_         = 0.35f;
 
+    // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-imu-cascade-20260614 (IMU-heading inner + ultra-wall outer + softstart)");
+    ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
+             config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
+    ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f",
+             config_wall_k_dist_, config_wall_k_par_, config_wall_off_max_, config_speed_max_, config_softstart_sec_);
     ROS_INFO("========================================");
     ROS_INFO("MoveController 配置参数:");
     ROS_INFO("  speed = %.2f m/s", config_speed_);
@@ -269,9 +275,16 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     float current_angular_correction = 0.0f;
 
     // 串级直行: 锁定 IMU 航向基准 yaw_base(=当前/imu_heading; 段首与每次拐角对齐后重锁) + 复位内环 PD
-    double yaw_base = hs_have_yaw_ ? hs_yaw_rad_ : 0.0;
+    // 段首先等 IMU 首帧再锁(最多1s), 防首帧晚到把基准锁成绝对航向 0.0 → 大初始误差饱和打舵(评审 HIGH)。
+    // IMU 在跑时首帧 <50ms 即到、几乎不停留; 等不到(老驱动无/imu_heading)则降级, 主循环内首个新鲜帧到达时"懒锁"。
+    for (int i = 0; i < 20 && ros::ok() && !hs_have_yaw_; i++) { ros::spinOnce(); ros::Duration(0.05).sleep(); }
+    bool yaw_base_locked = (hs_have_yaw_ &&
+                            (ros::Time::now() - hs_yaw_stamp_).toSec() < config_heading_yaw_timeout_);
+    if (!yaw_base_locked) ROS_WARN("沿墙(串级): 段首未等到 /imu_heading 新鲜帧 → 暂退 odom 兜底, 待首帧到再懒锁航向基准");
+    double yaw_base = yaw_base_locked ? hs_yaw_rad_ : 0.0;
+    bool imu_fresh_prev = yaw_base_locked;   // 跟踪 IMU 新鲜态翻转, 掉线恢复时复位微分锚防尖峰
     hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
-    hs_t_prev_sample_ = hs_have_yaw_ ? hs_yaw_stamp_ : ros::Time::now();
+    hs_t_prev_sample_ = yaw_base_locked ? hs_yaw_stamp_ : ros::Time::now();
     hs_new_sample_ = false;
     // 缓启动斜坡起点(起步; 每次拐角恢复后重置)
     ros::Time ramp_start_time = ros::Time::now();
@@ -502,9 +515,14 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                     correction_start_time = ros::Time::now();
                     current_angular_correction = 0.0f;
                     // 串级: 拐角对齐后(已平行于新墙)重锁 IMU 航向基准 + 复位内环 PD + 重置缓启动斜坡
-                    yaw_base = hs_have_yaw_ ? hs_yaw_rad_ : yaw_base;
+                    // 重锁须校 IMU 新鲜度, 否则可能锁到陈旧航向(评审 MEDIUM)
+                    bool f_relock = (hs_have_yaw_ &&
+                                     (ros::Time::now() - hs_yaw_stamp_).toSec() < config_heading_yaw_timeout_);
+                    if (f_relock) { yaw_base = hs_yaw_rad_; yaw_base_locked = true; }
+                    else { ROS_WARN("拐角重锁: IMU 不新鲜, 沿用旧 yaw_base(或退化 odom 兜底)"); }
+                    imu_fresh_prev = f_relock;
                     hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
-                    hs_t_prev_sample_ = hs_have_yaw_ ? hs_yaw_stamp_ : ros::Time::now();
+                    hs_t_prev_sample_ = f_relock ? hs_yaw_stamp_ : ros::Time::now();
                     hs_new_sample_ = false;
                     ramp_start_time = ros::Time::now();
 
@@ -590,7 +608,8 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             bool imu_fresh = (hs_have_yaw_ &&
                               (ros::Time::now() - hs_yaw_stamp_).toSec() < config_heading_yaw_timeout_);
 
-            // ---- 外环: 距墙/平行 → 有界航向偏置 C(误差单位; 仅新鲜有效超声时刷新) ----
+            // ---- 外环: 距墙/平行 → 有界航向偏置 C ----
+            // C 单位 = rad(等效航向偏置, 叠进航向误差 e_total); K_DIST[rad/m] K_PAR[rad/m]; off_max 0.08≈4.6°。仅新鲜有效超声时刷新。
             float d = -1.0f, e_par = 0.0f, C = 0.0f;
             if (ultra_ok) {
                 d = 0.5f * (front + rear);              // 距右墙
@@ -603,6 +622,18 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             }
 
             if (imu_fresh) {
+                // 懒锁: 段首没等到 IMU → 此刻首帧到, 用它锁 yaw_base 并复位 PD(防以绝对航向0为基准)
+                if (!yaw_base_locked) {
+                    yaw_base = hs_yaw_rad_; yaw_base_locked = true;
+                    hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
+                    hs_t_prev_sample_ = hs_yaw_stamp_; hs_new_sample_ = false;
+                    ROS_WARN("沿墙(串级): IMU 首帧到, 懒锁 yaw_base=%.1fdeg", hs_yaw_rad_ * RAD_TO_DEG);
+                } else if (!imu_fresh_prev) {
+                    // IMU 掉线后恢复: 不动 yaw_base, 只复位微分锚, 跳过本拍微分防跨间隙尖峰
+                    hs_d_filt_ = 0.0;
+                    hs_e_prev_ = (double)config_heading_sign_ * (double)normalizeAngle((float)(hs_yaw_rad_ - yaw_base));
+                    hs_t_prev_sample_ = hs_yaw_stamp_; hs_new_sample_ = false;
+                }
                 // ======== 内环: 0614 实测好的航向 PD(误差 = IMU航向偏差 + 外环偏置C) ========
                 double e_head = (double)config_heading_sign_ *
                                 (double)normalizeAngle((float)(hs_yaw_rad_ - yaw_base));
@@ -664,6 +695,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 ROS_WARN_THROTTLE(1.0, "沿墙(IMU不可用→退化): u=%.3f (odom偏角=%.1f°)",
                                   angular_cmd, relative_theta * RAD_TO_DEG);
             }
+            imu_fresh_prev = imu_fresh;   // 记录本拍 IMU 新鲜态(掉线恢复检测用)
         }
         
         // ========== 发送移动命令 ==========
@@ -1392,7 +1424,7 @@ int main(int argc, char** argv) {
     nh.param("auto_start", auto_start, false);
     
     float test_distance = 4.1f;
-    float test_speed = 0.35f;
+    float test_speed = 0.25f;   // auto_start 调试用默认; 与构造函数 /speed 默认一致(0.25, 防履带打滑)。注: 此 setParam 走私有 nh, 与控制器读的全局 /speed 不同命名空间, 实际仍以全局 /speed 为准
     float test_timeout = 60.0f;
     float test_pump = 0.4f;
     
