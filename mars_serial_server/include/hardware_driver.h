@@ -208,6 +208,10 @@ private:
     
     void sendKeyboardVelCommand(const geometry_msgs::Twist& cmd_vel);
     void sendAutoVelCommand(const geometry_msgs::Twist &auto_vel_cmdmsg);
+    // [terminal4] 驱动合并(2026-06-15): /cmd_vel 看门狗(只停电机、保泵) + 融合航向注入 odom
+    void sendStopCommand();      // watchdog stop frame: zero motors only, keep pump (Q6)
+    void cmdVelWatchdog();       // 20Hz: stale /cmd_vel -> stop motors (pump kept)
+    void applyFusedHeading();    // fuse imu_roll into odom theta, kill bare-gyro drift (Q5)
 
     double speedSmooth(double  expected_speed,  double used_acce);
     double omegaSmooth(double  expected_omega,  double used_alpha);
@@ -395,6 +399,26 @@ private:
     ros::Time receive_end_time;
     ros::Time curr_time;
     ros::Time las_time;
+
+    // ===== [terminal4] 驱动合并新增成员 (2026-06-15) =====
+    // 差速配平+限幅 (复用 vcu 走直成果; 默认值=逐位保持现行为, 经 serial_server.launch 调)
+    double omega_gain_      = 6.4;    // /cmd_vel angular.z 增益 (原写死 6.4)
+    double track_bias_      = 0.0;    // 左右履带静态偏置 (>0:右减左增; 默认0=不补偿; launch 设 0.1)
+    double motor_scale_     = 230.0;  // 轮速->电机命令标度 (原写死 230)
+    double max_track_speed_ = 1.0;    // 履带目标速度限幅 (兜失控)
+    int    max_motor_cmd_   = 300;    // 最终电机命令上限 (兜底)
+    // /cmd_vel 看门狗 (只停电机、保泵)
+    double    cmd_vel_timeout_  = 0.5;
+    ros::Time last_cmd_vel_time_;
+    bool      cmd_vel_received_ = false;
+    bool      wd_timed_out_     = false;
+    int       wd_tick_          = 0;
+    // 融合航向注入 odom (Q5): theta 用 imu_roll 互补校正去漂; sign 须首跑验证
+    bool   use_fused_heading_  = true;
+    int    fused_heading_sign_ = 1;
+    double fused_heading_kc_   = 0.02;
+    double fused_heading_ref_  = 0.0;
+    bool   fused_heading_init_ = false;
 
     std::vector<double>         laser_vector3_;
     std::vector<double>         laser_quaternion_;

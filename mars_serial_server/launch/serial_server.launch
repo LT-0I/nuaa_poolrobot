@@ -1,4 +1,35 @@
 <launch>
+  <!-- ====== [terminal4] 驱动可调参数 (全局命名空间, 对应 hardware_driver 的全局 nh_.param) ======
+       不改操作说明 terminal-1 命令(roslaunch ... serial_server.launch)时走下方默认值; 要覆盖: ... track_bias:=0.1
+         omega_gain        转向增益(替代写死6.4)            默认6.4
+         track_bias        左右履带静态偏置(>0:右减左增,治"总向左偏")  默认0.0(P0行为不变); P1走直整定设0.1(实测达标值)
+         motor_scale       电机标度(替代写死230)            默认230.0
+         max_track_speed   履带速度限幅(兜失控,正常不触发)   默认1.0
+         max_motor_cmd     电机命令上限(兜底)                默认300
+         cmd_vel_timeout   /cmd_vel 看门狗超时(s,只停电机、泵不停)  默认0.5
+         use_fused_heading 融合航向注入 odom(Q5,去陀螺漂移)  默认true
+         fused_heading_sign 融合航向符号                      默认1; 若拐角后地图镜像/odom航向反向 改 -1 (首跑须验证)
+         fused_heading_kc  互补增益(去漂强度,小=不打架转弯)  默认0.02
+       默认=保持驱动现行为(*6.4/*230/track_bias=0/限幅宽), 仅 fused_heading 改 odom 航向(去漂, 预期改善记录位姿)。 -->
+  <arg name="omega_gain"         default="6.4"/>
+  <arg name="track_bias"         default="0.0"/>
+  <arg name="motor_scale"        default="230.0"/>
+  <arg name="max_track_speed"    default="1.0"/>
+  <arg name="max_motor_cmd"      default="300"/>
+  <arg name="cmd_vel_timeout"    default="0.5"/>
+  <arg name="use_fused_heading"  default="true"/>
+  <arg name="fused_heading_sign" default="1"/>
+  <arg name="fused_heading_kc"   default="0.02"/>
+  <param name="omega_gain"         value="$(arg omega_gain)"/>
+  <param name="track_bias"         value="$(arg track_bias)"/>
+  <param name="motor_scale"        value="$(arg motor_scale)"/>
+  <param name="max_track_speed"    value="$(arg max_track_speed)"/>
+  <param name="max_motor_cmd"      value="$(arg max_motor_cmd)"/>
+  <param name="cmd_vel_timeout"    value="$(arg cmd_vel_timeout)"/>
+  <param name="use_fused_heading"  value="$(arg use_fused_heading)"/>
+  <param name="fused_heading_sign" value="$(arg fused_heading_sign)"/>
+  <param name="fused_heading_kc"   value="$(arg fused_heading_kc)"/>
+
   <node pkg="mars_serial_server" type="serial_server_exe" name="serial_server_node" respawn="true" respawn_delay="10" output="screen">
     <param name="port" value="/dev/ttyS0"/>
     <param name="baud" value="115200"/>
@@ -8,7 +39,6 @@
     <param name="port" value="/dev/ttyUSB0"/>
     <param name="baud" value="57600"/>
   </node> -->
-\
 
   <!-- <node name="base_imu_link" pkg="tf" type="static_transform_publisher" args="0 0 0 0 0 0 /base_footprint /imu_link 50"/> -->
 

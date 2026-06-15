@@ -107,6 +107,10 @@ HardwareDriver::HardwareDriver(CallbackAsyncSerial *serial)
 HardwareDriver::~HardwareDriver()
 {
 }
+// [terminal4] 限幅小工具 (复用 vcu): 夹值, 默认参数下不触发
+static inline double t4_clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static inline int    t4_clampi(int v, int lo, int hi)         { return v < lo ? lo : (v > hi ? hi : v); }
+
 void HardwareDriver::rosNode()
 {
 
@@ -146,6 +150,30 @@ void HardwareDriver::rosNode()
     nh_.param("limit_omega", motion_params.limit_omega, 0.5);
     nh_.param("max_acce", motion_params.max_acce, 1.0);
     nh_.param("max_alpha", motion_params.max_alpha, 1.0);
+
+    // ===== [terminal4] 差速配平+限幅 / /cmd_vel 看门狗 / 融合航向注入 参数 (默认=保持现行为, 经 serial_server.launch 调) =====
+    nh_.param("omega_gain",      omega_gain_,      6.4);
+    nh_.param("track_bias",      track_bias_,      0.0);
+    nh_.param("motor_scale",     motor_scale_,     230.0);
+    nh_.param("max_track_speed", max_track_speed_, 1.0);
+    nh_.param("max_motor_cmd",   max_motor_cmd_,   300);
+    nh_.param("cmd_vel_timeout", cmd_vel_timeout_, 0.5);
+    if (track_bias_ >  0.15) track_bias_ =  0.15;
+    if (track_bias_ < -0.15) track_bias_ = -0.15;
+    if (max_track_speed_ <= 0.0) max_track_speed_ = 1.0;
+    if (max_motor_cmd_   <= 0)   max_motor_cmd_   = 300;
+    if (cmd_vel_timeout_ <= 0.0) cmd_vel_timeout_ = 0.5;
+    cmd_vel_received_  = false;
+    last_cmd_vel_time_ = ros::Time::now();
+    nh_.param("use_fused_heading", use_fused_heading_, true);
+    int fhs = 1; nh_.param("fused_heading_sign", fhs, 1); fused_heading_sign_ = (fhs >= 0) ? 1 : -1;
+    nh_.param("fused_heading_kc",  fused_heading_kc_, 0.02);
+    if (fused_heading_kc_ < 0.0) fused_heading_kc_ = 0.0;
+    if (fused_heading_kc_ > 0.5) fused_heading_kc_ = 0.5;
+    fused_heading_init_ = false;
+    ROS_WARN("[terminal4] driver-merge 20260615 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track=%.2f max_motor=%d cmd_vel_timeout=%.2f | fused=%d sign=%+d kc=%.3f",
+             omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_,
+             (int)use_fused_heading_, fused_heading_sign_, fused_heading_kc_);
 
     keyboardVel_cmd_sub_ = nh_.subscribe("cmd_vel", 100, &HardwareDriver::sendKeyboardVelCommand, this);
     autoVel_cmd_sub_ = nh_.subscribe("/autoVel_cmd", 100, &HardwareDriver::sendAutoVelCommand, this);
@@ -223,6 +251,12 @@ void HardwareDriver::rosNode()
         [this](const ros::TimerEvent&) {
             this->sendUltraCommand();
         }
+    );
+
+    // [terminal4] /cmd_vel 看门狗 (20Hz, 同单线程 spinner): 超时无指令 -> 只停电机、泵不停 (Q6)
+    ros::Timer cmd_watchdog_timer = nh_.createTimer(
+        ros::Duration(0.05),
+        [this](const ros::TimerEvent&) { this->cmdVelWatchdog(); }
     );
 
     ros::spin();
@@ -609,458 +643,26 @@ void HardwareDriver::UpdateUltra()
     ultra_data_pub_.publish(safe_data);
 }
 
- /*******  
-void HardwareDriver::UpdateImu()
+
+// [Q5] 用 IMU 融合真航向(imu_roll, D-19: 本机真航向=roll)互补校正 odom 航向 base_pose.theta。
+//  动机: 裸陀螺积分会漂; 终端4 每个静止扫描 95-100s 里零偏持续积分->记录位姿漂; 融合航向不漂。
+//  位置 delta 经 theta 投影, 故修航向同时拉直位置轨迹。
+//  实现: theta += Kc * wrap(fused - theta), fused = sign*(roll - ref); ref 首帧锁(令 odom theta=0 <-> fused=0)。
+//  WARN: sign 须首跑验证(转向见证): 若拐角后地图镜像, 改 serial_server.launch fused_heading_sign:=-1。kc/sign/开关均 ROS 参数。
+void HardwareDriver::applyFusedHeading()
 {
-    tf::Quaternion imu_quat;
-
-    ros::Time current_time = ros::Time::now();
-
-    // ========== 编码器同步==========
-    if (!encoder_synced_) {
-        std::lock_guard<std::mutex> lock(encoder_mutex);
-        
-        // 同步编码器基准值，避免第一帧产生假位移
-        last_right_econd = (double)motor_encoder.right_speeder / 720.0f;
-        last_left_econd = (double)motor_encoder.left_speeder / 720.0f;
-        
-        encoder_updated = false;
-        encoder_synced_ = true;
-        
-        ROS_WARN("编码器已同步，丢弃初始数据");
-        return;  // 第一帧不产生位移
-    }
-
-
- 
-    static int imu_count = 0;
-    static int encoder_count = 0;
-    static int last_encoder_value = 0;
-
-    imu_count++;
-    if (motor_encoder.right_speeder != last_encoder_value) {
-        encoder_count++;
-        last_encoder_value = motor_encoder.right_speeder;
-    }
-
-    // 每秒钟打印一次统计
-    if (imu_count % 100 == 0) {
-        cout << "IMU cnt: " << imu_count << ", encoder upd cnt: " << encoder_count << endl;
-    }
-
-    static bool first_check = true;
-    if (first_check) {
-        first_check = false;
-        if (fabs(base_pose.x) > 1000.0 || fabs(base_pose.y) > 1000.0) {
-            ROS_ERROR("⚠️ base_pose初始值异常！重置为0");
-            ROS_ERROR("  当前值: x=%.3f, y=%.3f", base_pose.x, base_pose.y);
-            base_pose.x = 0.0;
-            base_pose.y = 0.0;
-            base_pose.theta = 0.0;
-        }
-    }
-
-    // 零漂过滤
-    if (imu_flag == 0)
-    {   
-        cout << "【状态】imu_flag == 0，初始化中，跳过计算" << endl;
-        last_time = current_time;
-        imu_flag = 1;
-        return; // 第一次初始化，跳过计算
-    }
-
-    // ========== 关键修复：时间间隔保护 ==========
-    double dt = (current_time - last_time).toSec();
-    
-    // 防御性编程：防止ROS时间异常
-    if (dt <= 0) {
-        // 时间异常：小于等于0
-        ROS_WARN_THROTTLE(1.0, "时间异常: dt=%.6f <= 0，使用默认值0.01s", dt);
-        cout << "【警告】dt <= 0，跳过计算" << endl;
-        dt = 0.01;
-        last_time = current_time;
-        return;
-    }
-    
-    if (dt > 0.2) {
-        // ROS时间可能发生跳跃（如重启、时间同步等）
-        ROS_ERROR("时间跳跃异常: dt=%.3fs > 0.2s，跳过本次更新", dt);
-        last_time = current_time;
-        cout << "【警告】dt > 0.2，跳过计算" << endl;
-        // 重置编码器状态，避免错误积分
-        wheel_flag = 0;
-        imu_flag = 0;
-        return;
-    }
-    
-    if (dt > 0.1) {
-        // 时间间隔较大但仍在可接受范围
-        ROS_WARN_THROTTLE(5.0, "时间间隔较大: dt=%.3fs，限制为0.1s", dt);
-        
-        dt = 0.1;
-    }
-
-    last_time = current_time;
-
-    imu_datas.header.stamp = ros::Time::now();
-    imu_datas.header.frame_id = "imu_link";
-
-    double cur_right_econd = (double)motor_encoder.right_speeder/720.0f;
-    double cur_left_econd = (double)motor_encoder.left_speeder/720.0f;
-
- 
-    
-    // 检查编码器值是否异常（防止数据解析错误）
-    if (fabs(cur_right_econd) > 10000.0 || fabs(cur_left_econd) > 10000.0) {
-        std::cout << "编码器值异常: right=" << cur_right_econd 
-              << ", left=" << cur_left_econd 
-              << "，使用上次值" << std::endl;
-        // cur_right_econd = last_right_econd;
-        // cur_left_econd = last_left_econd;
-        encoder_updated = false;  // 关键：不更新
-        return;
-    }
-
-    if(wheel_flag == 0){
-        wheel_flag = 1;
-        
-        last_right_econd = cur_right_econd;
-        last_left_econd = cur_left_econd;
-        cout << "【状态】wheel_flag == 0，初始化编码器，跳过计算" << endl;
-        return; // 第一次初始化编码器，跳过计算
-    }
-    
-    // 检查编码器突变（单次变化过大）
-    double right_diff = fabs(cur_right_econd - last_right_econd);
-    double left_diff = fabs(cur_left_econd - last_left_econd);
-
-  
-    if (right_diff > 100.0 || left_diff > 100.0) {
- 
-
-       std::cout << "编码器突变: right_diff=" << right_diff 
-              << ", left_diff=" << left_diff 
-              << "，可能数据错误" << std::endl;
-        // 使用有限的变化量
-        double max_diff = 10.0;  // 最大允许单次变化
-        if (right_diff > max_diff) {
-            cur_right_econd = last_right_econd + 
-                ((cur_right_econd > last_right_econd) ? max_diff : -max_diff);
-        }
-        if (left_diff > max_diff) {
-            cur_left_econd = last_left_econd + 
-                ((cur_left_econd > last_left_econd) ? max_diff : -max_diff);
-        }
-    }
-
-   
-
-    // double dright_econd, dleft_econd;
-    // if(flagdirR == 1){
-    //     dright_econd = cur_right_econd - last_right_econd;
-    // }else{
-    //     dright_econd = -(cur_right_econd - last_right_econd);
-    // }
-
-    // if(flagdirL == 1){
-    //     dleft_econd  = cur_left_econd - last_left_econd;
-    // }else{
-    //     dleft_econd  = -(cur_left_econd - last_left_econd);
-    // }
-
-    // cout << "dright_econd =   " << dright_econd << endl;
-    // cout << "dleft_econd =   " << dleft_econd << endl;
-
-    double dright_econd = 0.0;
-    double dleft_econd = 0.0;
-    bool do_update = false;
-
-    {
-        std::lock_guard<std::mutex> lock(encoder_mutex);  // 注意：用 encoder_mutex
-
-        if (encoder_updated) {
-            double encoder_age = (current_time - last_encoder_stamp_).toSec();
-            if (encoder_age < 0.15) {  // 150ms内的数据才认为有效
-
-                if(flagdirR == 1){
-                    dright_econd = cur_right_econd - last_right_econd;
-                }else{
-                    dright_econd = -(cur_right_econd - last_right_econd);
-                }
-
-                if(flagdirL == 1){
-                    dleft_econd  = cur_left_econd - last_left_econd;
-                }else{
-                    dleft_econd  = -(cur_left_econd - last_left_econd);
-                }
-
-                // ========== 异常 delta 过滤  ==========
-                if (fabs(dright_econd) > 1.0 || fabs(dleft_econd) > 1.0) {
-                    ROS_ERROR("异常大delta，丢弃: dr=%.3f dl=%.3f", dright_econd, dleft_econd);
-                    encoder_updated = false;
-                    // 不更新位置，只更新时间
-                    last_time = current_time;
-                    publishTfTransforms();
-                    return;
-                }
-
-                last_right_econd = cur_right_econd;
-                last_left_econd = cur_left_econd;
-                do_update = true;
-            }
-            else {
-                ROS_WARN_THROTTLE(5.0, "编码器数据过旧，丢弃: age=%.3fs", encoder_age);
-            }
- 
-
-            encoder_updated = false;
-             
-        }
-    }
-
-    if (!do_update) {
-        // 没新编码器数据 → 不更新位置，只更新角度
-        base_pose.theta += imu_wz * PI_M / 180.0f * dt;
-        while (base_pose.theta > PI_M) base_pose.theta -= 2*PI_M;
-        while (base_pose.theta < -PI_M) base_pose.theta += 2*PI_M;
-        
-        publishTfTransforms();
-        // 发布里程计（位置不变）
-        wheel_odom.header.stamp = current_time;
-        wheel_odom.header.frame_id = "odom";
-        wheel_odom.child_frame_id = "base_link";
-        wheel_odom.pose.pose.position.x = base_pose.x;
-        wheel_odom.pose.pose.position.y = base_pose.y;
-        wheel_odom.pose.pose.orientation = tf::createQuaternionMsgFromYaw(base_pose.theta);
-        wheel_odom_pub_.publish(wheel_odom);
-        return;
-    }
-
-    cout << "dright_econd =   " << dright_econd << endl;
-    cout << "dleft_econd =   " << dleft_econd << endl;
-
-    
-    // // 检查增量是否合理
-    double max_single_move = 0.2;  // 米
-    // double wheel_circumference = 1.5;  // 应该是轮子周长（米/圈）
-    double wheel_circumference = M_PI * machine_params.wheel_diameter;  
-
-    // dright_econd 单位是圈数，直接乘以周长得到米
-    double abs_right_move = fabs(dright_econd * wheel_circumference);
-    double abs_left_move = fabs(dleft_econd * wheel_circumference);
-
-    if (abs_right_move > max_single_move || abs_left_move > max_single_move) {
-        cout << "单次移动过大: right=" << abs_right_move 
-            << "m, left=" << abs_left_move << "m" << endl;
-        
-        // 压缩圈数
-        double scale = max_single_move / fmax(abs_right_move, abs_left_move);
-        dright_econd *= scale;
-        dleft_econd *= scale;
-    }
-
-    // 计算位移（米）
-    base_dist_x = (dright_econd + dleft_econd) / 2.0 * wheel_circumference;
- 
-
-    // 检查base_dist_x是否合理
-    if (fabs(base_dist_x) > max_single_move) {
-        std::cout << "base_dist_x异常: " << base_dist_x << "m > " << max_single_move 
-              << "m，跳过本次位置更新" << std::endl;
-        base_dist_x = (base_dist_x > 0) ? max_single_move : -max_single_move;
-    }
-
- 
- 
-    static float dist_a = 0.0, dist_b = 0.0;
-    dist_a = dright_econd + dist_a;
-    dist_b = dleft_econd + dist_b;
-
-    last_right_econd = cur_right_econd;
-    last_left_econd = cur_left_econd;
-
-    imu_datas.angular_velocity.x = 0.0;
-    imu_datas.angular_velocity.y = 0.0;
-    imu_datas.angular_velocity.z = imu_wz * PI_M / 180.0f;
-
-    imu_datas.linear_acceleration.x = -imu_ay - 0.3;
-    imu_datas.linear_acceleration.y = -9.81;
-    imu_datas.linear_acceleration.z = imu_ax + 0.2;
-
-    cout << "=== 位置更新 ===" << endl;
-    cout << "base_dist_x = " << base_dist_x << endl;
-    cout << "当前角度 = " << base_pose.theta * 180.0/M_PI << "°" << endl;
-
-    double original_x = base_pose.x;
-    double original_y = base_pose.y;
-    cout << "原始位置: X=" << original_x << ", Y=" << original_y << endl;
-
-    // 保存当前角度
-    double current_theta = base_pose.theta;
-    
-    // 计算位移
-    double delta_x = base_dist_x * cos(current_theta);
-    double delta_y = base_dist_x * sin(current_theta);
-    
-    // ========== 关键修复：位置更新保护 ==========
-    bool skip_position_update = false;
-    bool reset_odometry = false;
-    
-    // 1. 检查位移大小
-    double max_delta_per_update = 0.2;
-    double delta_magnitude = sqrt(delta_x*delta_x + delta_y*delta_y);
-    
-    if (delta_magnitude > max_delta_per_update) {
-        ROS_ERROR("位移异常！大小=%.3fm, dt=%.3fs", delta_magnitude, dt);
-        skip_position_update = true;
-    }
-    
-    // 2. 计算新位置
-    double new_x = original_x + delta_x;
-    double new_y = original_y + delta_y;
-    
-    // 3. 检查数值有效性
-    if (!std::isfinite(new_x) || !std::isfinite(new_y)) {
-        ROS_ERROR("位置值非有限数！");
-        skip_position_update = true;
-    }
-    
-    // 4. 检查位置突变（核心保护）
-    double max_position_jump = 2.0;  // 改为2.0米更严格
-    if (!skip_position_update && 
-        (fabs(new_x - original_x) > max_position_jump || 
-         fabs(new_y - original_y) > max_position_jump)) {
-        ROS_ERROR("位置突变异常！ΔX=%.3f, ΔY=%.3f", new_x-original_x, new_y-original_y);
-        skip_position_update = true;
-    }
-    
-    // 更新位置（如果检查通过）
-    if (!skip_position_update) {
-        base_pose.x = new_x;
-        base_pose.y = new_y;
-    }
-    
-    // 总是更新角度
-    base_pose.theta += imu_wz * PI_M / 180.0f * dt;
-    
-    // 角度规范化
-    while (base_pose.theta > PI_M) base_pose.theta -= 2*PI_M;
-    while (base_pose.theta < -PI_M) base_pose.theta += 2*PI_M;
-    
-    // 最终检查：如果位置异常，重置
-    if (fabs(base_pose.x) > 1000.0 || fabs(base_pose.y) > 1000.0) {
-        ROS_ERROR("位置值超出范围！重置里程计");
-        base_pose.x = 0.0;
-        base_pose.y = 0.0;
-        base_pose.theta = 0.0;
-        wheel_flag = 0;
-        imu_flag = 0;
-        last_right_econd = cur_right_econd;
-        last_left_econd = cur_left_econd;
-        reset_odometry = true;
-    }
-    // ============================================
-
-    // 调试输出
-    cout << "位移: ΔX=" << delta_x << ", ΔY=" << delta_y << endl;
-    if (skip_position_update) {
-        cout << "⚠️ 跳过位置更新" << endl;
-    }
-    if (reset_odometry) {
-        cout << "⚠️ 里程计已重置" << endl;
-    }
-    cout << "新位置: X=" << std::fixed << std::setprecision(6) << base_pose.x 
-         << ", Y=" << base_pose.y << endl;
-    cout << "新角度: " << base_pose.theta * 180.0/M_PI << "°" << endl;
-     cout << "新弧度: " << base_pose.theta << endl;
-    // 融合IMU和编码器数据计算角度变化
-   
-    // double imu_theta_diff = imu_wz * PI_M / 180.0f * dt;
-    // double encoder_theta_diff = (dright_econd - dleft_econd) / machine_params.wheel_spacing;
-
-    // // 加权融合：IMU权重0.8，编码器权重0.2
-    // // 这样IMU负责快速响应，编码器负责长期稳定性
-    // double fused_theta_diff = 0.8 * imu_theta_diff + 0.2 * encoder_theta_diff;
-
-    // base_pose.theta += fused_theta_diff;
-
-    // // 规范化角度到[-π, π]范围
-    // while (base_pose.theta > PI_M) base_pose.theta -= 2*PI_M;
-    // while (base_pose.theta < -PI_M) base_pose.theta += 2*PI_M;
-
-
-
-    // base_pose.theta = base_pose.theta + imu_wz * PI_M / 180.0f * dt;
-    // // 角度规范化（可选，但建议保留）
-    // while (base_pose.theta > PI_M) base_pose.theta -= 2*PI_M;
-    // while (base_pose.theta < -PI_M) base_pose.theta += 2*PI_M;
-
-    // base_twist_state.linear.x = base_dist_x/dt;
-    // imu_datas.orientation = tf::createQuaternionMsgFromYaw(base_pose.theta);
-
-
-    // cout << "wx: " << imu_datas.angular_velocity.x << endl;
-    // cout << "wy: " << imu_datas.angular_velocity.y << endl;
-    // cout << "wz: " << imu_datas.angular_velocity.z << endl;
-    // cout << "ax: " << imu_datas.linear_acceleration.x << endl;
-    // cout << "ay: " << imu_datas.linear_acceleration.y << endl;
-    // cout << "az: " << imu_datas.linear_acceleration.z << endl;
-
-    imu_datas.orientation_covariance = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-    imu_datas.angular_velocity_covariance = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-    imu_datas.linear_acceleration_covariance = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-    imu_data_pub_.publish(imu_datas);
-
-    // cout << "dt " << dt << endl;
-    cout << "base_pose.x  " << base_pose.x << endl;
-    cout << "dist_datas " << dist_datas.data[0] <<  " " << dist_datas.data[1] << " " << dist_datas.data[2] << " " <<dist_datas.data[3] << endl;
-    // // // // cout << "base_pose.y  " << base_pose.y << endl;
-    cout << "base_pose.theta  " << base_pose.theta * 180.0/M_PI << endl;
-    cout << "base_pose.theta  rd" << base_pose.theta << endl;
-    // cout << "dright_econd = " << dright_econd << endl;
-    // cout << "dleft_econd = " << dleft_econd << endl;
-    // cout << "dist_a = " << dist_a << endl;
-    // cout << "dist_b = " << dist_b << endl;
-    // cout << "motor_encoder.right_speeder = " << motor_encoder.right_speeder << endl;
-    // cout << "motor_encoder.left_speeder = " << motor_encoder.left_speeder << endl;
-    // cout << "base_twist_state.linear.x " << base_twist_state.linear.x << endl;
-    cout << "-------------------------------\n" << endl;
-
-    static int debug_count = 0;
-    if (debug_count++ % 50 == 0) {
-        cout << "=== 坐标系方向测试 ===" << endl;
-        cout << "机器人实际向前走时：" << endl;
-        cout << "base_pose.x（应该增加）: " << base_pose.x << endl;
-        cout << "base_pose.y（应该接近0）: " << base_pose.y << endl;
-        cout << "base_pose.theta（方向角）: " << base_pose.theta*180/M_PI << "°" << endl;
-        
-        // 建议：向前走时，base_pose.x应该增加，base_pose.y接近0
-        // 如果base_pose.y在增加，说明X/Y轴定义反了
-    }
-
-    wheel_odom.header.stamp = current_time;
-    wheel_odom.header.frame_id = "odom";
-    wheel_odom.child_frame_id = "base_link";
-    wheel_odom.pose.pose.position.x = base_pose.x;
-    wheel_odom.pose.pose.position.y = base_pose.y;
-    wheel_odom.pose.pose.position.z = 0.0f;
-    wheel_odom.pose.pose.orientation = tf::createQuaternionMsgFromYaw(base_pose.theta);
-
-    wheel_odom.twist.twist.linear.x = base_twist_state.linear.x;
-    wheel_odom.twist.twist.linear.y = 0.0;
-    wheel_odom.twist.twist.angular.z = imu_wz * PI_M / 180.0f;
-    base_twist_state.angular.z = imu_wz * PI_M / 180.0f;
-
-    wheel_odom_pub_.publish(wheel_odom);
-    Base_twist_pub_.publish(base_twist_state);
-    Base_pose_pub_.publish(base_pose);
-
- 
-
-     //  发布TF变换
-    publishTfTransforms();
+    if (!use_fused_heading_) return;
+    if (!imu_heading_ready_.load(std::memory_order_acquire)) return;   // imu_roll 尚未就绪
+    double roll_rad = (double)imu_roll * PI_M / 180.0;
+    if (!fused_heading_init_) { fused_heading_ref_ = roll_rad; fused_heading_init_ = true; }
+    double fused = (double)fused_heading_sign_ * (roll_rad - fused_heading_ref_);
+    while (fused >  PI_M) fused -= 2*PI_M;
+    while (fused < -PI_M) fused += 2*PI_M;
+    double err = fused - base_pose.theta;
+    while (err >  PI_M) err -= 2*PI_M;
+    while (err < -PI_M) err += 2*PI_M;
+    base_pose.theta += fused_heading_kc_ * err;   // 慢互补: Kc 小=去漂不打架转弯(默认0.02)
 }
- ***/
 
 void HardwareDriver::UpdateImu()
 {
@@ -1293,6 +895,7 @@ void HardwareDriver::UpdateImu()
     if (!do_update) {
         // 没新编码器数据 → 不更新位置，只更新角度
         base_pose.theta += imu_wz * PI_M / 180.0f * dt;
+        applyFusedHeading();   // [Q5] 融合航向互补校正(去陀螺漂移)
         while (base_pose.theta > PI_M) base_pose.theta -= 2*PI_M;
         while (base_pose.theta < -PI_M) base_pose.theta += 2*PI_M;
         
@@ -1446,7 +1049,8 @@ void HardwareDriver::UpdateImu()
     
     // 总是更新角度
     base_pose.theta += imu_wz * PI_M / 180.0f * dt;
-    
+    applyFusedHeading();   // [Q5] 融合航向互补校正(去陀螺漂移)
+
     // 角度规范化
     while (base_pose.theta > PI_M) base_pose.theta -= 2*PI_M;
     while (base_pose.theta < -PI_M) base_pose.theta += 2*PI_M;
@@ -1823,6 +1427,10 @@ void HardwareDriver::sendAutoVelCommand(const geometry_msgs::Twist &cmd_vel_msg)
     las_time = curr_time;
     // cout << "dt " << dt << endl;
 
+    // [terminal4] /autoVel_cmd 也喂看门狗, 防只用 autoVel 时被误停
+    last_cmd_vel_time_ = curr_time;
+    cmd_vel_received_  = true;
+
     double current_speed_command = cmd_vel.linear.x * 0.2;
     double current_omega_command = cmd_vel.angular.z * 6.4;
 
@@ -1886,8 +1494,12 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     las_time = curr_time;
     // cout << "dt " << dt << endl;
 
+    // [terminal4] 喂 /cmd_vel 看门狗 (单线程 spinner, 安全)
+    last_cmd_vel_time_ = curr_time;
+    cmd_vel_received_  = true;
+
     double current_speed_command = cmd_vel.linear.x;
-    double current_omega_command = cmd_vel.angular.z * 6.4 ;
+    double current_omega_command = cmd_vel.angular.z * omega_gain_;   // [terminal4] 6.4->omega_gain_ (默认6.4)
 
     // cout << "keybot dt " << dt << endl;
     // cout << "cmd_vel.linear.x = " << cmd_vel.linear.x << endl;
@@ -1919,8 +1531,14 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     // cout << "right_speed " << right_speed << endl;
     // cout << "left_speed " << left_speed << endl;
 
-    motor_command.right_speed = right_speed * 230; //-left_speed * 230;
-    motor_command.left_speed = -left_speed * 230; //right_speed * 230;
+    // [terminal4] 左右履带静态偏置补偿(track_bias_, 默认0=不补偿; >0:右减左增治"总向左偏") + 限幅 + 可调标度
+    //   默认 track_bias=0/motor_scale=230/限幅宽 -> 与原 *230 逐位等价; serial_server.launch 设 track_bias:=0.1 复现实测走直
+    right_speed *= (1.0 - track_bias_);
+    left_speed  *= (1.0 + track_bias_);
+    right_speed = t4_clampd(right_speed, -max_track_speed_, max_track_speed_);
+    left_speed  = t4_clampd(left_speed,  -max_track_speed_, max_track_speed_);
+    motor_command.right_speed = t4_clampi((int)( right_speed * motor_scale_), -max_motor_cmd_, max_motor_cmd_);
+    motor_command.left_speed  = t4_clampi((int)(-left_speed  * motor_scale_), -max_motor_cmd_, max_motor_cmd_);
     // motor_command.spin_speed = fabs((current_speed_command)*150) + fabs((current_omega_command)*50);
     // if(fabs(current_speed_command) == 0) {
         // motor_command.spinl_speed = fabs((current_speed_command)*240);
@@ -1967,6 +1585,39 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     MSG_Type send_type = CM_DEV_CTL_TYPE;
     int send_id = RCRID_MOTOR_COMMUN;
     sendMessage(send_type, send_id, (uint8_t *)&motor_command, (uint8_t)sizeof(motor_command));
+}
+
+// [terminal4] 看门狗停车帧: 只置零电机, 水泵(spinl/spinr)保持上次值 -> 停车时泵仍转(站位/浮力)(Q6)。
+//  仅在单线程 spinner(看门狗 Timer)调用, sendMessage 不竞态。
+void HardwareDriver::sendStopCommand()
+{
+    motor_command.right_speed = 0;
+    motor_command.left_speed  = 0;
+    // 注意: 不动 spinl_speed/spinr_speed(水泵) —— 按需求只停电机、不停泵
+    MSG_Type send_type = CM_DEV_CTL_TYPE;
+    int send_id = RCRID_MOTOR_COMMUN;
+    sendMessage(send_type, send_id, (uint8_t *)&motor_command, (uint8_t)sizeof(motor_command));
+}
+
+// [terminal4] /cmd_vel 看门狗(20Hz, spinner 线程): 超时无新指令 -> 只停电机(泵不停)。
+//  边沿触发: 进入超时即停一次 + 之后 ~5Hz 重申(幂等防丢帧); 从未收到指令前不抢串口。
+//  WARN 安全: 本看门狗只发"电机=0"帧, 真停车取决于 MCU 行为、未现场证实; 唯一可靠停车仍是断电。
+void HardwareDriver::cmdVelWatchdog()
+{
+    if (!cmd_vel_received_) return;
+    double age = (ros::Time::now() - last_cmd_vel_time_).toSec();
+    if (age > cmd_vel_timeout_) {
+        if (!wd_timed_out_ || (++wd_tick_ % 4 == 0)) {
+            sendStopCommand();
+        }
+        if (!wd_timed_out_) {
+            wd_timed_out_ = true;
+            ROS_WARN("[terminal4] cmd_vel watchdog: no cmd for %.2fs, MOTORS stopped (pump kept) re-assert ~5Hz", age);
+        }
+    } else {
+        wd_timed_out_ = false;
+        wd_tick_ = 0;
+    }
 }
 
 void HardwareDriver::sendUltraCommand(){
