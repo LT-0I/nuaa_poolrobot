@@ -371,6 +371,9 @@ private:
     // 原 if(imu_heading_pub_) guard 是对 ros::Publisher 内部 shared_ptr 的竞态读=C++11 UB。
     // 用 atomic 标志 + release/acquire 建立同步：advertise 完成后 store(true,release)，RX 侧 load(acquire) 为真才发。
     std::atomic<bool>   imu_heading_ready_{false};
+    // [terminal4] imu_roll 真新鲜标志: RX 线程写完 imu_roll 后 release-store; applyFusedHeading acquire-load 才读 imu_roll
+    //   -> 建立 happens-before(消除跨线程陈旧/撕裂读) + 确保不在首帧前用未初值锁死 ref(评审 BLOCKER)
+    std::atomic<bool>   imu_roll_valid_{false};
 
     // ----------------------------- Subscriber ----------------------------
     ros::Subscriber     manualVel_cmd_sub_;

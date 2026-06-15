@@ -44,6 +44,7 @@ HardwareDriver::HardwareDriver(CallbackAsyncSerial *serial)
     imu_ay = 0.0;
     imu_az = 9.8;
     imu_wz = 0.0;
+    imu_roll = 0.0; imu_pitch = 0.0; imu_yaw = 0.0;   // [terminal4] 防 applyFusedHeading 首帧前读未初值(评审 BLOCKER 防御)
 
     imu_ax_last = 0.0;
     imu_ay_last = 0.0;
@@ -517,6 +518,7 @@ void HardwareDriver::receiveImuDatas()
     imu_roll = (float)(imu_encoder.roll) / 100.0f;
     imu_pitch = (float)(imu_encoder.pitch) / 100.0f;
     imu_yaw = (float)(imu_encoder.yaw) / 100.0f;
+    imu_roll_valid_.store(true, std::memory_order_release);   // [terminal4] imu_roll 已写, 发布"真新鲜"(与 applyFusedHeading acquire 配对)
     static int log_cnt = 0;
     if (log_cnt++ % 100 == 0) {
         cout << "IMU att: roll=" << imu_roll
@@ -652,7 +654,9 @@ void HardwareDriver::UpdateUltra()
 void HardwareDriver::applyFusedHeading()
 {
     if (!use_fused_heading_) return;
-    if (!imu_heading_ready_.load(std::memory_order_acquire)) return;   // imu_roll 尚未就绪
+    // 评审 BLOCKER 修复: 门控用 imu_roll_valid_(RX 写完 imu_roll 才 release) 而非 imu_heading_ready_(advertise 即真),
+    //   否则会在首帧前用未初始化 imu_roll 锁死 fused_heading_ref_=垃圾 -> 永久偏置记录航向。acquire 配 release 建 happens-before。
+    if (!imu_roll_valid_.load(std::memory_order_acquire)) return;
     double roll_rad = (double)imu_roll * PI_M / 180.0;
     if (!fused_heading_init_) { fused_heading_ref_ = roll_rad; fused_heading_init_ = true; }
     double fused = (double)fused_heading_sign_ * (roll_rad - fused_heading_ref_);
@@ -662,6 +666,8 @@ void HardwareDriver::applyFusedHeading()
     while (err >  PI_M) err -= 2*PI_M;
     while (err < -PI_M) err += 2*PI_M;
     base_pose.theta += fused_heading_kc_ * err;   // 慢互补: Kc 小=去漂不打架转弯(默认0.02)
+    // [terminal4] sign 自检可观测: 残差应随行进->0; 若 |residual| 不收敛/变大 => fused_heading_sign 反了, launch 改 -1
+    ROS_INFO_THROTTLE(2.0, "[fused] heading residual=%.1f deg (should ->0; if grows, flip fused_heading_sign)", err * 180.0 / PI_M);
 }
 
 void HardwareDriver::UpdateImu()
@@ -1532,7 +1538,8 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     // cout << "left_speed " << left_speed << endl;
 
     // [terminal4] 左右履带静态偏置补偿(track_bias_, 默认0=不补偿; >0:右减左增治"总向左偏") + 限幅 + 可调标度
-    //   默认 track_bias=0/motor_scale=230/限幅宽 -> 与原 *230 逐位等价; serial_server.launch 设 track_bias:=0.1 复现实测走直
+    //   默认下: 工作区间(|轮速|<=max_track_speed=1.0)与原 *230 逐位等价(评审 200k 采样核验);
+    //   超 1.0 才限幅(原无限幅、直送电机), 实测命令(走直<=0.27/沿边角速度小)远在区间内。launch 设 track_bias:=0.1 复现实测走直。
     right_speed *= (1.0 - track_bias_);
     left_speed  *= (1.0 + track_bias_);
     right_speed = t4_clampd(right_speed, -max_track_speed_, max_track_speed_);
