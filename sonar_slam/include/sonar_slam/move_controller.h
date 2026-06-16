@@ -245,8 +245,8 @@ private:
     // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 =====
     // 全局 nh_.param, 构造期读一次(终端2 裸 rosrun 无 launch → 默认即操作值, 仅【启动前】rosparam set 生效)。
     bool   config_enable_corner_         = true;   // false=跳过前墙拐角块走纯串级直行(直行段单独整定 + 作回归基线)
-    float  config_corner_front_trigger_m_= 1.5f;   // 前超声(data0前左/data1前右)min<此且>0.3m 触发拐角; 保 1.5 给停车物理裕度
-    int    config_corner_front_confirm_  = 3;      // 连续确认帧(>0.3m 地板拒噪)
+    float  config_corner_front_trigger_m_= 1.5f;   // 前超声(data0前左/data1前右)min<此且>0.05m 触发拐角; 保 1.5 给停车物理裕度
+    int    config_corner_front_confirm_  = 3;      // 连续确认帧(>0.05m 近场地板拒噪, 上限内全有效)
     float  config_corner_settle_sec_     = 1.0f;   // 停稳取入航向时长(持续 20Hz 发零运动+泵, 喂看门狗)
     float  config_corner_turn_deg_       = 90.0f;  // 闭环左转目标(融合航向转过幅值)
     float  config_corner_turn_omega_     = 0.2f;   // 粗转角速度(cmd; 左转 angular>0; ×6.4≈1.28rad/s)
