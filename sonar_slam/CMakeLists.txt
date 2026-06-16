@@ -177,6 +177,9 @@ set(LINEAR_DUAL_SONAR_MAPPER_SRC  src/linear_dual_sonar_mapper.cpp)
 
 set(MULTI_POSITION_SONAR_MAPPER_SRC  src/multi_position_sonar_mapper.cpp)
 
+# 手动点位声呐采集节点（终端1手动开车 + 服务触发逐点采集）
+set(MANUAL_POINT_COLLECTOR_SRC  src/manual_point_collector.cpp)
+
 # 新增 AsyncSerial.cpp
 set(ASYNC_SERIAL_SRC src/AsyncSerial.cpp)
 
@@ -466,6 +469,45 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${MULTI_POSITION_SONAR_MAPPER_SRC})
   )
   
   message(STATUS "Added executable: multi_position_sonar_mapper")
+endif()
+
+
+# ==============================================
+# 8.2 手动点位声呐采集节点 - manual_point_collector
+# ==============================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${MANUAL_POINT_COLLECTOR_SRC})
+  message(STATUS "Found manual_point_collector.cpp")
+
+  add_executable(manual_point_collector
+    ${MANUAL_POINT_COLLECTOR_SRC}
+    ${ASYNC_SERIAL_SRC}
+  )
+
+  add_dependencies(manual_point_collector
+    ${catkin_EXPORTED_TARGETS}
+    ${PROJECT_NAME}_generate_messages_cpp
+  )
+
+  target_link_libraries(manual_point_collector
+    ${catkin_LIBRARIES}
+    ${Boost_LIBRARIES}
+    ${Eigen3_LIBRARIES}
+  )
+
+  if(PCL_FOUND)
+    target_link_libraries(manual_point_collector ${PCL_LIBRARIES})
+    target_include_directories(manual_point_collector PRIVATE ${PCL_INCLUDE_DIRS})
+  endif()
+
+  target_include_directories(manual_point_collector PRIVATE ${EIGEN3_INCLUDE_DIR})
+
+  set_target_properties(manual_point_collector PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+  )
+
+  message(STATUS "Added executable: manual_point_collector")
 endif()
 
 
