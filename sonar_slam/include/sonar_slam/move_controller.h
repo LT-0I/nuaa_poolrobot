@@ -74,9 +74,6 @@ private:
     void applyKeyboardCommand(char key);
     void keyboardTimerCallback(const ros::TimerEvent& event);
     
-    // ========== 对齐功能 ==========
-    void alignToRightWallOnly();
-    
     // ========== 传感器回调 ==========
     void odomCallback(const nav_msgs::Odometry::ConstPtr& msg);
     void ultraCallback(const std_msgs::Int32MultiArray::ConstPtr& msg);
@@ -202,12 +199,6 @@ private:
         int   ctrl_mode;   // 0=无IMU(odom兜底) 1=IMU+超声 2=IMU守航向(丢墙)
     };
     std::vector<WalkLogData> log_buffer_;
- 
-    std::deque<float> front_buffer_;
-    std::deque<float> rear_buffer_;
-    float movingAverageFilter(float new_value, std::deque<float>& buffer, int window_size = 3);
-
-    bool rotateToTargetAngle(float target_angle_deg, float timeout = 8.0f);
 
     // 右侧超声"新鲜度"跟踪。超声实测 MCU 推流 ~10Hz/通道、/ultra_data 话题 ~20Hz 转发(ZOH)。
     // seq=拐角 stop-and-settle 用(只在原始值真变化时推进, 避免对 ZOH 重复值重复精修);
@@ -217,6 +208,9 @@ private:
     int last_ultra_raw_rf_;        // 上次原始 data[2]
     int last_ultra_raw_rr_;        // 上次原始 data[3]
 
+    // ⚠铁律: 本节点单线程回调队列(main 用 ros::Rate+spinOnce, 阻塞 move 循环内用嵌套 spinOnce)。
+    //   hs_yaw_*/hs_new_sample_/wall_sensors_/ultra_* 等跨"回调↔主循环"共享态据此免锁(或仅 sensor_mutex_ 快照)。
+    //   严禁改用 AsyncSpinner/MultiThreadedSpinner, 否则这些无锁 double/float 共享会撕裂、须全量补锁。
     // ===== 串级直行: IMU 融合航向(/imu_heading) 内环 PD + 超声距墙外环 =====
     // /imu_heading 状态(与主循环 spinOnce 同线程、回调亦在该线程执行, 无需加锁)
     bool      hs_have_yaw_   = false;
@@ -233,7 +227,7 @@ private:
     double config_heading_kd_          = 1.0;
     double config_heading_ki_          = 0.0;
     double config_heading_i_clamp_     = 0.05;
-    double config_heading_omega_limit_ = 0.15;  // 总角速度命令限幅(cmd; ×6.4 才是 rad/s)
+    double config_heading_omega_limit_ = 0.30;  // 总角速度命令限幅(cmd; ×6.4 才是 rad/s); Q3 实测直行值 0.30
     double config_heading_tau_d_       = 0.2;   // 微分低通时间常数(s)
     double config_heading_yaw_timeout_ = 0.5;   // /imu_heading 陈旧阈值(s), 超则退 odom 兜底
     int    config_heading_sign_        = 1;     // 航向误差极性(0614 实测 +1=负反馈)
@@ -243,7 +237,23 @@ private:
     // ⚠ 稳定性依赖右前/右后纵向基距 L: 特征根过阻尼需 L<1/k_par≈1.67m(k_par=0.6)。Orange Pi 小车 L<1m 必满足、安全;
     //   若换大车/调大 k_par, 须复核 L。另: off_max=0.10 使 |d-target|>0.5m 时外环按限幅 slew(开环段), 仿真"44s收敛"假定起步已近目标。
     float  config_speed_max_           = 0.30f; // 前进速度安全上限(防履带打滑临界~0.27)
-    float  config_softstart_sec_       = 1.5f;  // 缓启动斜坡(s): 起步/拐角后速度在此时长内线性 0→目标
+    float  config_softstart_sec_       = 1.5f;  // 缓启动斜坡(s): 起步/拐角后速度【与外环C权限】在此时长内线性 0→目标
+    // 外环新墙/平行一致性闸门: |右后-右前|≥此 → 判畸变(拐角凹角/一传感器照旧墙一照新墙)→弃距墙外环、纯IMU守航向。
+    // 兼治拐角畸变区误锁(评审 BLOCKER)与物理不可能的平行读数。
+    float  config_wall_consistency_m_  = 0.5f;
+
+    // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 =====
+    // 全局 nh_.param, 构造期读一次(终端2 裸 rosrun 无 launch → 默认即操作值, 仅【启动前】rosparam set 生效)。
+    bool   config_enable_corner_         = true;   // false=跳过前墙拐角块走纯串级直行(直行段单独整定 + 作回归基线)
+    float  config_corner_front_trigger_m_= 1.5f;   // 前超声(data0前左/data1前右)min<此且>0.3m 触发拐角; 保 1.5 给停车物理裕度
+    int    config_corner_front_confirm_  = 3;      // 连续确认帧(>0.3m 地板拒噪)
+    float  config_corner_settle_sec_     = 1.0f;   // 停稳取入航向时长(持续 20Hz 发零运动+泵, 喂看门狗)
+    float  config_corner_turn_deg_       = 90.0f;  // 闭环左转目标(融合航向转过幅值)
+    float  config_corner_turn_omega_     = 0.2f;   // 粗转角速度(cmd; 左转 angular>0; ×6.4≈1.28rad/s)
+    float  config_corner_turn_omega_fine_= 0.10f;  // 近目标降速(⚠水下若低于电机起转阈会停在~88°; 首跑量, 必要时0.12~0.15)
+    float  config_corner_slow_deg_       = 15.0f;  // 距目标此角内降到 fine
+    float  config_corner_turn_timeout_   = 8.0f;   // 转向硬超时(s)
+    float  config_corner_turn_cap_deg_   = 130.0f; // odom 角兜底上限(默认 turn+40°宽裕度): 仅兜 IMU 大故障/防过转, 不与 IMU 到位判据争紧裕度(评审 HIGH)
 
     // 串级调参快照(主循环每拍更新, recordWalkData 1Hz 采样进 CSV)
     float dbg_imu_yaw_deg_  = 0.0f;
