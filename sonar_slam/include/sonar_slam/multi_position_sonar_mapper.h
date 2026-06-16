@@ -244,6 +244,8 @@ public:
      * @brief 开始实时扫描
      */
     void startScanning();
+    void openPumpLatch();   // 运行级水泵闩锁: 任务起始置 /move_controller/pump_enable=true(整段持泵)
+    void closePumpLatch();  // 任务结束/中止置 false(撤闩, 回落单段策略)
     
     /**
      * @brief 停止扫描
@@ -640,6 +642,8 @@ private:
     bool move_completed_;
      // 移动服务客户端
     ros::ServiceClient move_straight_client_;
+    ros::Publisher pump_enable_pub_;          // /move_controller/pump_enable 运行级水泵闩锁(std_msgs::Bool, latched)
+    bool pump_latch_published_open_ = false;  // 幂等闸: 防重复 open/close
 
         // 角度信息结构体
     struct AngleInfo {

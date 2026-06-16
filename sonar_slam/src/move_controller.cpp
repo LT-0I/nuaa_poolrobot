@@ -53,6 +53,12 @@ MoveController::MoveController() :
     imu_heading_sub_ = nh_.subscribe("/imu_heading", 50, &MoveController::imuHeadingCallback, this);
     ROS_INFO("订阅器: /imu_heading");
 
+    // 订阅运行级水泵闩锁 /move_controller/pump_enable(std_msgs::Bool):
+    // true=整段沿边任务持泵(mapper 任务起始前置位)、false=撤闩回落单段策略。
+    // 单测(无 mapper)时无人发布、保持 false=原单段行为。
+    pump_enable_sub_ = nh_.subscribe("/move_controller/pump_enable", 10, &MoveController::pumpEnableCallback, this);
+    ROS_INFO("订阅器: /move_controller/pump_enable");
+
     // 创建服务服务器
     move_straight_srv_ = nh_.advertiseService(
         "/move_controller/move_straight", 
@@ -72,9 +78,12 @@ MoveController::MoveController() :
     // 读取水泵速度参数
     // 默认 0.25(0614 实测能走直的速度; 高于 ~0.27 履带打滑临界会侧滑); 实际再夹 speed_max
     nh_.param("speed", config_speed_, 0.25f);
-    float temp_pump = 0.0f;
-    nh_.param("pump_speed", temp_pump, 0.1f);
-    user_config_pump_speed_ = 0.4f;
+    // 水泵速度读 ROS 参数 pump_speed(默认 0.4 = 改前实际值); 夹 [0,1] 匹配驱动 linear.y->spin 映射。
+    float temp_pump = 0.4f;
+    nh_.param("pump_speed", temp_pump, 0.4f);
+    if (temp_pump < 0.0f) temp_pump = 0.0f;
+    if (temp_pump > 1.0f) temp_pump = 1.0f;
+    user_config_pump_speed_ = temp_pump;
     // 目标距右墙距离(m)，沿墙距离环用。3.0=阶段目标(距壁3m循迹)。
     // ⚠头号下水未知: 右前/右后超声在 3m 掠射平直池壁能否拿到稳定回波(掠射存亡); 拿不到→串级退化纯IMU守航向(直行,
     //   距墙环失效)。下水前先静态实测(距右墙3.0m平行静止读 data[2]/[3] 是否稳定有效); 拿不到则降到掠射可见最大距离(如2.0~2.5)。
@@ -571,8 +580,8 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             current_speed = std::min(current_speed, cmd_speed * std::max(0.3f, remaining / slow_down_dist));
         }
 
-        // ==================== 提前关泵 ====================
-        if (pump_on && !pump_closed_early && remaining < 0.3f && remaining > 0) {
+        // ==================== 提前关泵(仅单段; 整段闩锁时不提前撤泵) ====================
+        if (pump_on && !pump_closed_early && !run_pump_latched_ && remaining < 0.3f && remaining > 0) {
             pump_on = false;
             pump_closed_early = true;
             config_pump_speed_ = 0.0f;
@@ -711,7 +720,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
         // ========== 发送移动命令 ==========
         geometry_msgs::Twist cmd;
         cmd.linear.x = (move_direction == 'w') ? current_speed : -current_speed;
-        cmd.linear.y = pump_on ? pump_speed : 0.0f;
+        cmd.linear.y = (run_pump_latched_ || pump_on) ? pump_speed : 0.0f;  // 整段闩锁时即使单段 pump_on 翻假也持泵
         cmd.angular.z = current_angular_correction;
         cmd_vel_pub_.publish(cmd);
         
@@ -730,7 +739,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     
     // ==================== 结束处理 ====================
     stop();
-    if (pump_on) {
+    if (pump_on && !run_pump_latched_) {  // 整段闩锁时段末不撤泵(交由闩锁跨段持泵)
         geometry_msgs::Twist cmd;
         cmd.linear.x = 0.0f;
         cmd.linear.y = 0.0f;
@@ -829,8 +838,10 @@ void MoveController::keyboardTimerCallback(const ros::TimerEvent& event) {
     cmd.linear.x = keyboard_sim_.current_vx;
     cmd.angular.z = current_angular;
 
-     // ========== 只有行走状态才输出水泵速度 ==========
-    if (move_state_ == 1) {  // 行走中
+     // ========== 水泵: 运行级闩锁优先(跨段/扫描停顿持泵), 否则按行走状态(单段回退) ==========
+    if (run_pump_latched_) {  // 整段沿边任务: 空闲(含扫描停顿)也持泵, 电机仍为 0
+        cmd.linear.y = user_config_pump_speed_;  // 闩锁下即 run 级泵速(为0则本就该关泵)
+    } else if (move_state_ == 1) {  // 行走中(单段回退)
         cmd.linear.y = config_pump_speed_;
     } else {
         cmd.linear.y = 0.0f;
@@ -900,6 +911,13 @@ void MoveController::imuHeadingCallback(const std_msgs::Float32::ConstPtr& msg) 
     hs_yaw_stamp_  = ros::Time::now();
     hs_have_yaw_   = true;
     hs_new_sample_ = true;
+}
+
+void MoveController::pumpEnableCallback(const std_msgs::Bool::ConstPtr& msg) {
+    // 运行级水泵闩锁。与主循环 spinOnce 同线程执行(单回调队列), 无需加锁。
+    // true=整段持泵(跨段/扫描停顿不撤泵); false=撤闩回落单段策略。ASCII 打印(机上无中文字库)。
+    run_pump_latched_ = msg->data;
+    ROS_INFO("pump latch %s", run_pump_latched_ ? "ON" : "OFF");
 }
 
 // ==================== 辅助函数 ====================
@@ -973,9 +991,11 @@ void MoveController::stopMoving() {
     
     geometry_msgs::Twist stop_cmd;
     stop_cmd.linear.x = 0.0f;
-    stop_cmd.linear.y = 0.0f;
+    // 整段闩锁时停车保泵(段末/扫描停顿不撤泵, 消除每段末 ~0.2s 断泵抖动); 否则全停(含泵)。
+    // 仅段末(disabling_timer_ 仍真、空闲定时器关)调用 → 与定时器不并发, 不构成双写。
+    stop_cmd.linear.y = run_pump_latched_ ? user_config_pump_speed_ : 0.0f;
     stop_cmd.angular.z = 0.0f;
-    
+
     for (int i = 0; i < 3; i++) {
         cmd_vel_pub_.publish(stop_cmd);
         ros::Duration(0.05).sleep();

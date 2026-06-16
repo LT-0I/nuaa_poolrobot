@@ -240,6 +240,8 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     // 多位置建图发布器
     phase_multi_status_pub_ = nh_.advertise<std_msgs::String>("/phase_multi/status", 1, true);
     phase_multi_submap_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/phase_multi/submaps", 1, true);
+    // 运行级水泵闩锁发布器(latched): 任务起始 true / 结束·中止 false → move_controller 整段持泵
+    pump_enable_pub_ = nh_.advertise<std_msgs::Bool>("/move_controller/pump_enable", 1, true);
     // 添加标准地图发布器
     standard_map_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("/map", 1, true);
     
@@ -288,6 +290,7 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
 
 
 MultiPositionSonarMapper::~MultiPositionSonarMapper() {
+    closePumpLatch();   // 兜底撤闩(绕过 main 关闭的退出路径); ROS 已关时为 best-effort no-op
     stopScanning();
     
     if (sonar_serial_) {
@@ -2917,6 +2920,29 @@ bool MultiPositionSonarMapper::getCurrentRobotPoseInMap(geometry_msgs::Pose2D& p
 }
 
  
+// ======================== 运行级水泵闩锁 ========================
+
+void MultiPositionSonarMapper::openPumpLatch() {
+    // 整段沿边任务起始(第一次扫描/移动前)置闩锁 ON, move_controller 据此跨段持泵(含扫描停顿)。
+    // 幂等: 已开则不重发。0.4s 让 latched 话题送达 + move_controller 空闲定时器走一拍, 首次静止扫描即持泵。
+    if (pump_latch_published_open_) return;
+    std_msgs::Bool m; m.data = true;
+    pump_enable_pub_.publish(m);
+    pump_latch_published_open_ = true;
+    ros::Duration(0.4).sleep();
+    ROS_INFO("pump latch OPEN (run start)");
+}
+
+void MultiPositionSonarMapper::closePumpLatch() {
+    // 任务正常结束/中止时撤闩 OFF; 此刻机器人已静止(扫描间/后), 撤闩后 move_controller 空闲定时器即关泵 → "先停后关泵"。
+    // 幂等: 未开则不发。
+    if (!pump_latch_published_open_) return;
+    std_msgs::Bool m; m.data = false;
+    pump_enable_pub_.publish(m);
+    pump_latch_published_open_ = false;
+    ROS_INFO("pump latch CLOSED (run end)");
+}
+
 // ======================== 多位置建图主函数  ========================
 
 void MultiPositionSonarMapper::handlePhaseMultiMapping() {
@@ -2927,7 +2953,9 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
         ROS_INFO("==============================================");
         ROS_INFO("=== 多位置建图启动 (共 %d 个位置) ===", phase_multi_num_positions_);
         ROS_INFO("==============================================");
-        
+
+        openPumpLatch();   // 任务起始: 先开泵(在第一次扫描/移动前), 整段持泵
+
         phase_multi_step_ = 1;
         phase_multi_step_start_time_ = now;
         phase_multi_current_position_ = 1;
@@ -2979,7 +3007,8 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
                     if (is_scanning_.load()) {
                         stopScanning();
                     }
-                    
+                    closePumpLatch();   // 任务正常结束: 机器人已静止, 撤闩关泵
+
                     // 根据位置数量决定是否自动合并
                     if (phase_multi_num_positions_ <= 10) {
                         ROS_INFO("位置数量 ≤ 10，自动进行地图合并");
@@ -3024,7 +3053,8 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
             
             if (current_pos >= phase_multi_num_positions_) {
                 if (is_scanning_.load()) stopScanning();
-                
+                closePumpLatch();   // 任务结束(超时分支): 撤闩关泵
+
                 if (phase_multi_num_positions_ <= 10) {
                     phase_multi_step_ = 100;
                     // mergeMultipleSubmaps();
@@ -3064,6 +3094,7 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
             ROS_ERROR("多位置建图终止！");
             phase_multi_enabled_ = false;
             phase_multi_step_ = 0;
+            closePumpLatch();   // 中止: 撤闩关泵(否则闩锁会令空闲泵长开)
             publishPhaseMultiStatus("建图终止（move_controller不可用）");
             return;
         }
@@ -3116,6 +3147,7 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
                 ROS_ERROR("多位置建图终止！");
                 phase_multi_enabled_ = false;
                 phase_multi_step_ = 0;
+                closePumpLatch();   // 中止: 撤闩关泵
                 publishPhaseMultiStatus("建图终止（移动失败）");
             }
         } else {
@@ -3123,6 +3155,7 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
             ROS_ERROR("多位置建图终止！");
             phase_multi_enabled_ = false;
             phase_multi_step_ = 0;
+            closePumpLatch();   // 中止: 撤闩关泵
             publishPhaseMultiStatus("建图终止（服务调用失败）");
         }
 
@@ -3757,11 +3790,12 @@ void MultiPositionSonarMapper::stopPhaseMultiMapping() {
     
     phase_multi_enabled_ = false;
     phase_multi_step_ = 0;
-    
+
     if (is_scanning_.load()) {
         stopScanning();
     }
-    
+    closePumpLatch();   // 手动停止服务(/stop_phase_multi_mapping)也是一条任务结束路径: 撤闩关泵(否则闩锁令空闲泵长开); 幂等
+
     publishPhaseMultiStatus("已停止");
 }
 
@@ -4184,8 +4218,9 @@ int main(int argc, char** argv) {
         }
     
     
+    mapper.closePumpLatch();   // Ctrl-C/退出: 撤闩关泵(主循环退出后节点仍在, 能送达)
     mapper.stopScanning();
-    
+
     ROS_INFO("Sonar Realtime Mapper 关闭");
     return 0;
 }

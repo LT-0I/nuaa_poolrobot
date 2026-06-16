@@ -7,6 +7,7 @@
 #include "sonar_slam/MoveStraight.h"
 #include <std_msgs/Int32MultiArray.h>
 #include <std_msgs/Float32.h>
+#include <std_msgs/Bool.h>
 #include <geometry_msgs/Twist.h>
 #include <geometry_msgs/Pose2D.h>
 #include <nav_msgs/Odometry.h>
@@ -78,6 +79,7 @@ private:
     void odomCallback(const nav_msgs::Odometry::ConstPtr& msg);
     void ultraCallback(const std_msgs::Int32MultiArray::ConstPtr& msg);
     void imuHeadingCallback(const std_msgs::Float32::ConstPtr& msg);   // /imu_heading 融合航向(度)
+    void pumpEnableCallback(const std_msgs::Bool::ConstPtr& msg);      // /move_controller/pump_enable 运行级水泵闩锁
 
     // ========== 辅助函数 ==========
     void updateCurrentPose();
@@ -141,6 +143,7 @@ private:
     ros::Subscriber odom_sub_;
     ros::Subscriber ultra_sub_;
     ros::Subscriber imu_heading_sub_;   // /imu_heading 融合航向(度)，串级直行内环用
+    ros::Subscriber pump_enable_sub_;   // /move_controller/pump_enable 运行级水泵闩锁(mapper 整段持泵)
     ros::ServiceServer move_straight_srv_;
     ros::Timer keyboard_timer_;
     tf::TransformListener tf_listener_;
@@ -166,7 +169,11 @@ private:
     float config_pump_speed_; // 配置的水泵速度
     float config_wall_align_;   // 目标距右墙距离(m)，沿墙距离环用
     float config_wall_stale_sec_;  // 右侧超声陈旧看门狗(s)，超此时长无新鲜帧→退 odom 兜底；须≥右侧刷新周期，随驱动 ultra_poll_period 调
-    float user_config_pump_speed_;  // 用户命令行配置的水泵速度
+    float user_config_pump_speed_;  // 水泵速度(ROS 参数 pump_speed, 默认 0.4; 夹[0,1])
+    // 运行级水泵闩锁: mapper 在整段沿边任务前置 true(/move_controller/pump_enable)、结束/中止置 false。
+    // true=跨段持泵(空闲定时器/段末停车/扫描停顿都不撤泵); false=回落单段策略(原行为, 单测无 mapper 时即此)。
+    // 单回调队列线程: 仅 pumpEnableCallback 写、定时器/主循环读 → 无锁(见下方 AsyncSpinner 铁律)。
+    bool run_pump_latched_ = false;
     // 控制参数
     float linear_tolerance_;  // 位置容差
 
