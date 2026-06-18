@@ -6,11 +6,15 @@
  * 本节点把"运动"交给操作员: 终端1 驱动 + mogo_teleop_keyboard.py 手动开车到点位停下,
  * 然后调用 ROS 服务 /point_collect/record 触发"采这个点位":
  *   - 扫描期间连续记录 odom 流(/wheel_odom);
- *   - 按原版逻辑驱动 Ping360 声呐(逐角发 0x0A29 命令, 解析 2300 帧), 扫 scan_duration 秒;
- *   - 落盘原始源数据(每帧 raw 强度采样) + 原版 per-angle 汇总 + 点云(.pcd) + meta。
+ *   - 按原版逻辑驱动 Ping360 声呐(逐角发 0x0A29 命令, 解析 2300 帧), 扫【整一圈 360deg=400 角】后即停
+ *     (手控由操作员控运动, 不再给声呐计时; 量程 range_level 为唯一常调参数);
+ *   - 给声呐方的交付三件套(照原版终端4 格式/命名/目录): ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml};
+ *   - 我方诊断附加(留 point 夹): cloud.pcd(ASCII 副本) + sonar_raw/summary CSV + odom_stream + meta。
  *
- * 数据层次: ~/sonar_logs/manual_collect/task_<时间戳>/point_NN/{odom_stream.csv,
- *           sonar_raw.csv, sonar_summary.csv, cloud.pcd, meta.txt}
+ * 数据层次:
+ *   交付(声呐方): ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd,pgm,yaml}  (照原版终端4)
+ *   附加(我方):   ~/sonar_logs/manual_collect/task_<时间戳>/point_NN/{odom_stream.csv,
+ *                 sonar_raw.csv, sonar_summary.csv, cloud.pcd(ASCII), meta.txt}
  *   - task 夹: 每次启动本节点一个; point 夹: 每次 /point_collect/record 一个。
  *
  * 边界:
@@ -25,11 +29,11 @@
 #include <ros/ros.h>
 #include <std_srvs/Trigger.h>
 #include <nav_msgs/Odometry.h>
+#include <nav_msgs/OccupancyGrid.h>
 #include <tf/transform_datatypes.h>   // tf::getYaw
 
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
-#include <pcl/io/pcd_io.h>
 
 #include "sonar_slam/AsyncSerial.h"
 
@@ -38,6 +42,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <locale>
 #include <vector>
 #include <string>
 #include <atomic>
@@ -46,6 +51,8 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
+#include <cfloat>
 #include <sys/stat.h>
 
 using boost::placeholders::_1;
@@ -121,8 +128,16 @@ private:
     // ---- 落盘 ----
     void writeRawCsv(const std::string& dir, const std::vector<RawFrame>& frames);
     void writeSummaryCsv(const std::string& dir, const std::vector<RawFrame>& frames, int angle_base);
-    void writeCloudPcd(const std::string& dir, const std::vector<RawFrame>& frames, int angle_base);
-    void writeMeta(const std::string& dir, const ros::Time& t_start, const ros::Time& t_end, size_t n_frames);
+    pcl::PointCloud<pcl::PointXYZI> buildCloud(const std::vector<RawFrame>& frames, int angle_base);
+    void writeAsciiPcd(const std::string& path, const pcl::PointCloud<pcl::PointXYZI>& cloud);
+    void writeBinaryPcd(const std::string& path, const pcl::PointCloud<pcl::PointXYZI>& cloud);
+    // 给声呐方三件套(逐字移植 main mapper, 保证与终端4 输出同构)
+    void createOccupancyGrid(const pcl::PointCloud<pcl::PointXYZI>& cloud);
+    bool saveMapAsPGM(const std::string& filename, const nav_msgs::OccupancyGrid& map);
+    bool saveMapAsYAML(const std::string& filename, const std::string& pgm_file, const nav_msgs::OccupancyGrid& map);
+    std::string mapsDir();
+    void writeMeta(const std::string& dir, const ros::Time& t_start, const ros::Time& t_end,
+                   size_t n_frames, bool aborted, size_t angles_with_echo);
 
     static bool ensureDir(const std::string& path);
 
@@ -136,12 +151,22 @@ private:
     // 参数(默认对齐原版终端4命令)
     std::string serial_port_;
     int         baudrate_;
-    double      scan_duration_;
+    double      scan_timeout_sec_;   // 单圈扫描的安全上限(整圈全无回波时防服务卡死); 非计时器, 正常按整圈结束
+    double      angle_timeout_sec_;  // 单角等回波上限
     std::string range_level_;
     double      odom_rate_hz_;
     double      min_range_;
 
     float max_range_;   // 由 range_level_ 推得(samples*25ns*1500/2)
+
+    // 占据栅格(逐字移植 main mapper, 供声呐方三件套 PGM/YAML; 默认对齐终端4)
+    nav_msgs::OccupancyGrid occupancy_map_;
+    float  map_resolution_;
+    int    map_width_;
+    int    map_height_;
+    float  map_origin_x_;
+    float  map_origin_y_;
+    float  sound_speed_;
 
     // 串口接收缓冲 + 帧同步状态(仅 I/O 线程访问)
     unsigned char rx_buffer_[RX_BUFFER_SIZE];
@@ -197,15 +222,20 @@ ManualPointCollector::ManualPointCollector()
     current_message_.clear();
     latest_odom_ = OdomSample{0, 0, 0, 0, 0, 0};
 
-    // 参数(默认对齐原版终端4命令: /dev/ttyACM0 @115200, scan_duration=95, range_level=s0)
+    // 参数: 量程 range_level 为唯一常调参数; 每次 record 固定扫整一圈 400 角后停, 不计时。
     pnh_.param("serial_port", serial_port_, std::string("/dev/ttyACM0"));
     pnh_.param("baudrate",    baudrate_,    115200);
-    pnh_.param("scan_duration", scan_duration_, 95.0);
     pnh_.param("range_level", range_level_, std::string("s0"));
     pnh_.param("odom_rate_hz", odom_rate_hz_, 20.0);
-    pnh_.param("min_range",   min_range_,   0.1);
+    pnh_.param("min_range",   min_range_,   0.0);   // 照原版终端4(默认 0.0=不滤近场); 需要滤近场噪声可调高
+    // angle_timeout_sec: 单角等回波上限(回波通常几十 ms 即回; 0.5s 余量充足)。
+    //   单圈用 0.5s 而非原版 1.5s: 池壁掠射多无回波, 1.5s x 多角会拖长单圈并撞上安全上限被截断。
+    pnh_.param("angle_timeout_sec", angle_timeout_sec_, 0.5);
+    // scan_timeout_sec: 仅防卡死安全上限。默认 300 > 全无回波整圈 400x(0.5+0.1)=240s, 故正常整圈绝不被截断。
+    pnh_.param("scan_timeout_sec", scan_timeout_sec_, 300.0);
     if (odom_rate_hz_ < 1.0) odom_rate_hz_ = 1.0;
-    if (scan_duration_ < 1.0) scan_duration_ = 1.0;
+    if (angle_timeout_sec_ < 0.05) angle_timeout_sec_ = 0.05;
+    if (scan_timeout_sec_ < 5.0) scan_timeout_sec_ = 5.0;
     {
         static const char* kLevels[] =
             {"s0","s1","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11"};
@@ -218,6 +248,23 @@ ManualPointCollector::ManualPointCollector()
         uint16_t s = samplesForLevel(range_level_);
         max_range_ = s * 25e-6f * 1500.0f / 2.0f;
     }
+
+    // 占据栅格参数(默认对齐原版终端4: 0.05m/格, 4000x4000=200m 范围, 原点 -100,-100, 声速 1500)。
+    pnh_.param("map_resolution", map_resolution_, 0.05f);
+    pnh_.param("map_width",      map_width_,      4000);
+    pnh_.param("map_height",     map_height_,     4000);
+    pnh_.param("map_origin_x",   map_origin_x_,   -100.0f);
+    pnh_.param("map_origin_y",   map_origin_y_,   -100.0f);
+    pnh_.param("sound_speed",    sound_speed_,    1500.0f);
+    occupancy_map_.header.frame_id           = "map";
+    occupancy_map_.info.resolution           = map_resolution_;
+    occupancy_map_.info.width                = map_width_;
+    occupancy_map_.info.height               = map_height_;
+    occupancy_map_.info.origin.position.x    = map_origin_x_;
+    occupancy_map_.info.origin.position.y    = map_origin_y_;
+    occupancy_map_.info.origin.position.z    = 0.0;
+    occupancy_map_.info.origin.orientation.w = 1.0;
+    occupancy_map_.data.resize(static_cast<size_t>(map_width_) * map_height_, -1);
 
     // task 目录: ~/sonar_logs/manual_collect/task_<时间戳>[_N]/
     std::string home = getenv("HOME") ? getenv("HOME") : ".";
@@ -246,8 +293,10 @@ ManualPointCollector::ManualPointCollector()
 
     ROS_INFO("manual_point_collector params:");
     ROS_INFO("  serial_port=%s baudrate=%d", serial_port_.c_str(), baudrate_);
-    ROS_INFO("  scan_duration=%.1fs range_level=%s (max_range=%.2fm)",
-             scan_duration_, range_level_.c_str(), max_range_);
+    ROS_INFO("  mode=single 360deg sweep (400 angles) per record; range_level=%s (max_range=%.2fm)",
+             range_level_.c_str(), max_range_);
+    ROS_INFO("  angle_timeout_sec=%.2f scan_timeout_sec=%.1f (SAFETY ceiling, NOT a timer)",
+             angle_timeout_sec_, scan_timeout_sec_);
     ROS_INFO("  odom_rate=%.1fHz min_range=%.2fm", odom_rate_hz_, min_range_);
     ROS_INFO("  task_dir=%s", task_dir_.c_str());
 
@@ -565,8 +614,8 @@ bool ManualPointCollector::onRecord(std_srvs::Trigger::Request& /*req*/,
         point_counter_--;
         return true;
     }
-    ROS_INFO("=== collecting point %d -> %s (scan %.1fs) ===",
-             point_counter_, point_dir.c_str(), scan_duration_);
+    ROS_INFO("=== collecting point %d -> %s (single 360deg sweep) ===",
+             point_counter_, point_dir.c_str());
     runCollect(point_dir);
     res.success = true;
     res.message = point_dir;
@@ -618,15 +667,24 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     const double odom_period = 1.0 / odom_rate_hz_;
     ros::Time scan_start = ros::Time::now();
     ros::Time next_odom = scan_start;
-    unsigned short angle = 0;
+    bool aborted = false;
 
-    while ((ros::Time::now() - scan_start).toSec() < scan_duration_ && ros::ok()) {
-        ROS_INFO_THROTTLE(10.0, "scanning... %.0f/%.0fs (angle=%u)",
-                          (ros::Time::now() - scan_start).toSec(), scan_duration_, angle);
-        // 1. 先清本角接收标志(必须在发命令前: 否则极快回包会被这次清零吞掉->空等 1.5s)
+    // 固定扫整一圈: 设备角 0 -> 399 各发一次, 收齐(或单角超时)即转下一角; 走完一圈即停。
+    // 不再按 scan_duration 连续多圈累积(那会把点云堆到几十万点并拖崩落盘)。
+    for (unsigned short angle = 0; angle < 400 && ros::ok(); ++angle) {
+        // 安全上限: 整圈几乎全无回波时防服务卡死(正常一圈远小于此, 非计时器)
+        if ((ros::Time::now() - scan_start).toSec() >= scan_timeout_sec_) {
+            ROS_WARN("scan_timeout_sec=%.1f reached at angle=%u -- aborting sweep early (sonar mostly silent?)",
+                     scan_timeout_sec_, angle);
+            aborted = true;
+            break;
+        }
+        ROS_INFO_THROTTLE(5.0, "sweeping... angle=%u/400 (%.0fs elapsed)",
+                          angle, (ros::Time::now() - scan_start).toSec());
+        // 1. 先清本角接收标志(必须在发命令前: 否则极快回包会被这次清零吞掉->空等)
         {
             std::lock_guard<std::mutex> lk(frame_mutex_);
-            if (angle < 400) angle_received_[angle] = 0;
+            angle_received_[angle] = 0;
         }
         // 2. 发本角发射命令
         unsigned char cmd[24];
@@ -638,29 +696,25 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
                 ROS_ERROR_THROTTLE(5.0, "serial write failed: %s", e.what());
             }
         }
-        // 3. 等本角数据返回(<=1.5s), 期间持续 spin + 采 odom
+        // 3. 等本角数据返回(<=angle_timeout_sec_), 期间持续 spin + 采 odom
         ros::Time wait_start = ros::Time::now();
         while (!angleReceived(angle) &&
-               (ros::Time::now() - wait_start).toSec() < 1.5 &&
-               (ros::Time::now() - scan_start).toSec() < scan_duration_ &&
+               (ros::Time::now() - wait_start).toSec() < angle_timeout_sec_ &&
+               (ros::Time::now() - scan_start).toSec() < scan_timeout_sec_ &&
                ros::ok()) {
             pumpOnce(odom_ofs, next_odom, odom_period);
         }
-        // 4. 下一个角(满 400 回零)
-        angle++;
-        if (angle >= 400) {
-            angle = 0;
-            std::lock_guard<std::mutex> lk(frame_mutex_);
-            std::fill(angle_received_.begin(), angle_received_.end(), 0);
-        }
-        // 5. 角间节拍 ~0.1s, 仍持续采 odom
+        // 4. 角间节拍 ~0.1s, 仍持续采 odom
         ros::Time pace_start = ros::Time::now();
         while ((ros::Time::now() - pace_start).toSec() < 0.1 &&
-               (ros::Time::now() - scan_start).toSec() < scan_duration_ &&
+               (ros::Time::now() - scan_start).toSec() < scan_timeout_sec_ &&
                ros::ok()) {
             pumpOnce(odom_ofs, next_odom, odom_period);
         }
     }
+    // 节点关停(Ctrl-C, ros::ok()=false)中途退出也算未扫满整圈 -> 标 partial(防把残圈当完整圈)
+    if (!ros::ok()) aborted = true;
+    if (aborted) ROS_WARN("sweep did not cover all 400 angles (safety timeout or shutdown); cloud/summary PARTIAL");
 
     collecting_.store(false);
     if (odom_ofs.is_open()) { odom_ofs.flush(); odom_ofs.close(); }
@@ -676,10 +730,37 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     // 不取 snap.front().angle: 否则一旦首帧是乱序/迟到帧, 整片点云会被任意旋转(评审 HIGH)。
     int angle_base = 0;
 
+    // 统计本圈有回波(非空帧)的不同角度数, 连同是否被安全上限截断一起写入 meta 标注有效性。
+    std::vector<char> echo_seen(400, 0);
+    size_t angles_with_echo = 0;
+    for (const RawFrame& rf : snap) {
+        if (rf.angle < 400 && !echo_seen[rf.angle]) { echo_seen[rf.angle] = 1; angles_with_echo++; }
+    }
+
+    // 构建点云(90 度旋转 + 量程过滤), 供三件套与本地副本共用
+    pcl::PointCloud<pcl::PointXYZI> cloud = buildCloud(snap, angle_base);
+
+    // ==== 给声呐方的交付三件套: 照原版终端4 -> ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml} ====
+    if (!cloud.points.empty()) {
+        const std::string md = mapsDir();
+        if (!md.empty()) {
+            const std::string base = "phase_multi_submap_" + std::to_string(point_counter_)
+                                   + "_pos" + std::to_string(point_counter_);
+            writeBinaryPcd(md + base + ".pcd", cloud);        // 二进制(同原版格式, ofstream 直写绕开 PCL mmap)
+            createOccupancyGrid(cloud);                        // -> occupancy_map_
+            saveMapAsPGM(md + base + ".pgm", occupancy_map_);
+            saveMapAsYAML(md + base + ".yaml", base + ".pgm", occupancy_map_);
+            ROS_INFO("sonar deliverable triple -> %s{.pcd,.pgm,.yaml}", (md + base).c_str());
+        } else {
+            ROS_WARN("maps dir unavailable -> sonar triple SKIPPED (only local extras saved)");
+        }
+    }
+
+    // ==== 我方诊断附加(留 point 夹): ASCII 点云副本 + 原始/汇总 CSV + meta ====
+    writeAsciiPcd(point_dir + "cloud.pcd", cloud);
     writeRawCsv(point_dir, snap);
     writeSummaryCsv(point_dir, snap, angle_base);
-    writeCloudPcd(point_dir, snap, angle_base);
-    writeMeta(point_dir, scan_start, t_end, snap.size());
+    writeMeta(point_dir, scan_start, t_end, snap.size(), aborted, angles_with_echo);
     if (snap.empty()) {
         ROS_WARN("NO sonar frames captured -- check sonar serial / range_level / robot in-water");
     }
@@ -740,8 +821,8 @@ void ManualPointCollector::writeSummaryCsv(const std::string& dir, const std::ve
     f.close();
 }
 
-// ======================== 落盘: 点云(对齐 mapper convertToPointCloud 的 90 度旋转) ========================
-void ManualPointCollector::writeCloudPcd(const std::string& dir, const std::vector<RawFrame>& frames, int angle_base) {
+// ======================== 由帧构建点云(对齐 mapper convertToPointCloud: 0.9deg/角, dpp*0.73, 90 度旋转) ========================
+pcl::PointCloud<pcl::PointXYZI> ManualPointCollector::buildCloud(const std::vector<RawFrame>& frames, int angle_base) {
     pcl::PointCloud<pcl::PointXYZI> cloud;
     const float rot = 90.0f * DEG_TO_RAD;
     const float cos_t = cosf(rot), sin_t = sinf(rot);
@@ -769,24 +850,223 @@ void ManualPointCollector::writeCloudPcd(const std::string& dir, const std::vect
             cloud.points.push_back(p);
         }
     }
-
-    if (cloud.points.empty()) {
-        ROS_WARN("point cloud empty -> skip cloud.pcd");
-        return;
-    }
-    cloud.width = cloud.points.size();
+    cloud.width  = cloud.points.size();
     cloud.height = 1;
     cloud.is_dense = false;
-    try {
-        pcl::io::savePCDFileBinary(dir + "cloud.pcd", cloud);
-    } catch (const std::exception& e) {
-        ROS_WARN("savePCDFile failed: %s", e.what());
+    return cloud;
+}
+
+// ======================== 落盘: ASCII PCD(我方副本, CloudCompare 直开 + 校验二进制) ========================
+void ManualPointCollector::writeAsciiPcd(const std::string& path, const pcl::PointCloud<pcl::PointXYZI>& cloud) {
+    if (cloud.points.empty()) { ROS_WARN("cloud empty -> skip ascii pcd: %s", path.c_str()); return; }
+    std::ofstream pf(path, std::ios::out | std::ios::trunc);
+    if (!pf.is_open()) { ROS_WARN("cannot open ascii pcd for write: %s", path.c_str()); return; }
+    pf.imbue(std::locale::classic());   // force '.' decimal point regardless of any global locale
+    const size_t npts = cloud.points.size();
+    pf << "# .PCD v0.7 - Point Cloud Data file format\n"
+       << "VERSION 0.7\n" << "FIELDS x y z intensity\n" << "SIZE 4 4 4 4\n"
+       << "TYPE F F F F\n" << "COUNT 1 1 1 1\n"
+       << "WIDTH " << npts << "\n" << "HEIGHT 1\n"
+       << "VIEWPOINT 0 0 0 1 0 0 0\n" << "POINTS " << npts << "\n" << "DATA ascii\n";
+    pf << std::fixed << std::setprecision(4);
+    for (const pcl::PointXYZI& p : cloud.points) {
+        pf << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
     }
+    pf.flush();
+    if (!pf.good()) ROS_WARN("ascii pcd stream error -- may be incomplete: %s", path.c_str());
+    pf.close();
+}
+
+// ======================== 落盘: 二进制 PCD(同原版 savePCDFileBinary 格式, 但 ofstream 直写绕开崩掉的 PCL mmap) ========================
+// 磁盘逐点 16 字节: float32 x,y,z,intensity(小端, ARM); 与 pcl::io::loadPCDFile 对
+// FIELDS x y z intensity / SIZE 4 4 4 4 / TYPE F F F F / COUNT 1 1 1 1 / DATA binary 的解析一致。
+// 注意: pcl::PointXYZI 内存 sizeof=32(intensity 在偏移16); PCL 二进制写盘同样按 FIELDS 紧凑成 16B/点,
+//       故此手写格式与 PCL 产出在磁盘上一致, 标准读取器(PCL/CloudCompare)解析无差异。
+void ManualPointCollector::writeBinaryPcd(const std::string& path, const pcl::PointCloud<pcl::PointXYZI>& cloud) {
+    if (cloud.points.empty()) { ROS_WARN("cloud empty -> skip binary pcd: %s", path.c_str()); return; }
+    std::ofstream pf(path, std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!pf.is_open()) { ROS_WARN("cannot open binary pcd for write: %s", path.c_str()); return; }
+    pf.imbue(std::locale::classic());
+    const size_t npts = cloud.points.size();
+    pf << "# .PCD v0.7 - Point Cloud Data file format\n"
+       << "VERSION 0.7\n" << "FIELDS x y z intensity\n" << "SIZE 4 4 4 4\n"
+       << "TYPE F F F F\n" << "COUNT 1 1 1 1\n"
+       << "WIDTH " << npts << "\n" << "HEIGHT 1\n"
+       << "VIEWPOINT 0 0 0 1 0 0 0\n" << "POINTS " << npts << "\n" << "DATA binary\n";
+    for (const pcl::PointXYZI& p : cloud.points) {
+        const float buf[4] = { p.x, p.y, p.z, p.intensity };
+        pf.write(reinterpret_cast<const char*>(buf), sizeof(buf));   // 16 bytes/point, little-endian
+    }
+    pf.flush();
+    if (!pf.good()) {
+        ROS_WARN("binary pcd stream error -- may be incomplete: %s", path.c_str());
+    } else {
+        ROS_INFO("binary pcd written: %zu points -> %s", npts, path.c_str());
+    }
+    pf.close();
+}
+
+// ======================== ~/sonar_logs/maps/ (与原版终端4 同一交付目录) ========================
+std::string ManualPointCollector::mapsDir() {
+    std::string home = getenv("HOME") ? getenv("HOME") : ".";
+    std::string base = home + "/sonar_logs/";
+    std::string md   = base + "maps/";
+    ensureDir(base);
+    if (!ensureDir(md)) { ROS_WARN("cannot create maps dir: %s", md.c_str()); return std::string(); }
+    return md;
+}
+
+// ======================== 占据栅格(逐字移植 main mapper createOccupancyGrid, 入参改为传入点云) ========================
+void ManualPointCollector::createOccupancyGrid(const pcl::PointCloud<pcl::PointXYZI>& cloud) {
+    if (cloud.points.empty()) return;
+
+    // 1. 动态计算当前点云的实际范围
+    float min_x = FLT_MAX, max_x = -FLT_MAX;
+    float min_y = FLT_MAX, max_y = -FLT_MAX;
+    for (const auto& p : cloud.points) {
+        if (p.x < min_x) min_x = p.x;
+        if (p.x > max_x) max_x = p.x;
+        if (p.y < min_y) min_y = p.y;
+        if (p.y > max_y) max_y = p.y;
+    }
+
+    // 2. 扩展边界，留出余量
+    float margin = 5.0f;
+    min_x -= margin; max_x += margin;
+    min_y -= margin; max_y += margin;
+
+    // 3. 计算新的地图尺寸
+    float new_width  = max_x - min_x;
+    float new_height = max_y - min_y;
+    int new_map_width  = static_cast<int>(new_width  / map_resolution_) + 100;
+    int new_map_height = static_cast<int>(new_height / map_resolution_) + 100;
+
+    // 4. 如果范围变化，重新初始化地图(与原版一致: 4m 单圈点云通常够不到 4000x4000 默认, 该分支不触发)
+    bool need_resize = false;
+    if (new_map_width > map_width_ || new_map_height > map_height_) need_resize = true;
+    if (min_x < map_origin_x_ || min_y < map_origin_y_) need_resize = true;
+    if (need_resize) {
+        map_width_    = new_map_width;
+        map_height_   = new_map_height;
+        map_origin_x_ = min_x;
+        map_origin_y_ = min_y;
+        occupancy_map_.info.width             = map_width_;
+        occupancy_map_.info.height            = map_height_;
+        occupancy_map_.info.origin.position.x = map_origin_x_;
+        occupancy_map_.info.origin.position.y = map_origin_y_;
+        occupancy_map_.data.resize(static_cast<size_t>(map_width_) * map_height_, -1);
+        ROS_INFO("occupancy grid resized: %dx%d origin(%.1f,%.1f)",
+                 map_width_, map_height_, map_origin_x_, map_origin_y_);
+    }
+
+    // 5. 填充地图(只标占据格: occ=intensity*100/255 取最大; 其余保持 -1=未知, 不做空闲射线标记)
+    std::fill(occupancy_map_.data.begin(), occupancy_map_.data.end(), -1);
+    for (const auto& point : cloud.points) {
+        int map_x = static_cast<int>((point.x - map_origin_x_) / map_resolution_ + 0.5f);
+        int map_y = static_cast<int>((point.y - map_origin_y_) / map_resolution_ + 0.5f);
+        if (map_x >= 0 && map_x < map_width_ && map_y >= 0 && map_y < map_height_) {
+            int index = map_y * map_width_ + map_x;
+            int occ = static_cast<int>(point.intensity * 100.0f / 255.0f);
+            if (occ > occupancy_map_.data[index]) {
+                occupancy_map_.data[index] = static_cast<int8_t>(occ);
+            }
+        }
+    }
+    occupancy_map_.header.stamp = ros::Time::now();
+}
+
+// ======================== 落盘: PGM(逐字移植 main mapper saveMapAsPGM; 日志改 ASCII) ========================
+bool ManualPointCollector::saveMapAsPGM(const std::string& filename, const nav_msgs::OccupancyGrid& map) {
+    std::ofstream pgm_file(filename);
+    if (!pgm_file.is_open()) { ROS_ERROR("cannot open PGM file: %s", filename.c_str()); return false; }
+    pgm_file.imbue(std::locale::classic());
+    pgm_file << "P2\n";
+    pgm_file << "# Sonar360 SLAM Map - " << filename << "\n";
+    pgm_file << "# Generated: " << ros::Time::now() << "\n";
+    pgm_file << map.info.width << " " << map.info.height << "\n";
+    pgm_file << "255\n";
+    // 地图数据(行倒序, 因为 PGM 左下角原点)
+    for (int y = static_cast<int>(map.info.height) - 1; y >= 0; y--) {
+        for (int x = 0; x < static_cast<int>(map.info.width); x++) {
+            int value = map.data[y * static_cast<int>(map.info.width) + x];
+            int pgm_value;
+            if (value < 0)       pgm_value = 127;   // 未知=中性灰
+            else if (value == 0) pgm_value = 255;   // 自由=白
+            else                 pgm_value = 0;     // 占据=黑
+            pgm_file << pgm_value;
+            if (x < static_cast<int>(map.info.width) - 1) pgm_file << " ";
+        }
+        pgm_file << "\n";
+    }
+    pgm_file.flush();
+    bool ok = pgm_file.good();
+    pgm_file.close();
+    if (!ok) { ROS_WARN("PGM stream error -- file may be incomplete (disk full?): %s", filename.c_str()); return false; }
+    return true;
+}
+
+// ======================== 落盘: YAML(逐字移植 main mapper saveMapAsYAML; 日志改 ASCII) ========================
+bool ManualPointCollector::saveMapAsYAML(const std::string& filename,
+                                         const std::string& pgm_file,
+                                         const nav_msgs::OccupancyGrid& map) {
+    std::ofstream yaml_file(filename);
+    if (!yaml_file.is_open()) { ROS_ERROR("cannot open YAML file: %s", filename.c_str()); return false; }
+    yaml_file.imbue(std::locale::classic());   // force '.' decimals (resolution/origin/max_range) regardless of global locale
+
+    double yaw = tf::getYaw(map.info.origin.orientation);
+    int occupied = 0, free = 0, unknown = 0;
+    for (int val : map.data) {
+        if (val < 0) unknown++;
+        else if (val == 0) free++;
+        else if (val > 50) occupied++;
+    }
+
+    yaml_file << "# Sonar360 SLAM Map Configuration\n";
+    yaml_file << "# Generated at: " << ros::Time::now() << "\n";
+    yaml_file << "# ROS Time: " << ros::Time::now().toSec() << "\n\n";
+    yaml_file << "image: " << pgm_file << "\n";
+    yaml_file << "resolution: " << map.info.resolution << "\n";
+    yaml_file << "origin: [" << map.info.origin.position.x << ", "
+              << map.info.origin.position.y << ", " << yaw << "]\n";
+    yaml_file << "negate: 0\n";
+    yaml_file << "occupied_thresh: 0.65\n";
+    yaml_file << "free_thresh: 0.196\n\n";
+    yaml_file << "# ========== Sonar360 Metadata ==========\n";
+    yaml_file << "sensor_type: \"mechanical_scanning_single_beam\"\n";
+    yaml_file << "scan_resolution_deg: 1.0\n";
+    yaml_file << "max_range: " << max_range_ << "\n";
+    yaml_file << "min_range: " << min_range_ << "\n";
+    yaml_file << "sound_speed: " << sound_speed_ << "\n";
+    yaml_file << "frame_id: \"" << map.header.frame_id << "\"\n\n";
+    std::string pcd_filename = filename.substr(0, filename.find_last_of('.')) + ".pcd";
+    yaml_file << "# Point cloud reference (for ICP/NDT localization)\n";
+    yaml_file << "pointcloud: \"" << pcd_filename << "\"\n\n";
+    yaml_file << "# Metadata\n";
+    yaml_file << "metadata:\n";
+    yaml_file << "  width: " << map.info.width << "\n";
+    yaml_file << "  height: " << map.info.height << "\n";
+    yaml_file << "  timestamp: " << ros::Time::now().toSec() << "\n";
+    yaml_file << "  frame_id: \"" << map.header.frame_id << "\"\n\n";
+    yaml_file << "# Statistics\n";
+    yaml_file << "statistics:\n";
+    yaml_file << "  occupied_cells: " << occupied << "\n";
+    yaml_file << "  free_cells: " << free << "\n";
+    yaml_file << "  unknown_cells: " << unknown << "\n";
+    yaml_file << "  total_cells: " << map.data.size() << "\n";
+    yaml_file << "  occupied_percentage: " << (occupied * 100.0 / map.data.size()) << "%\n";
+    yaml_file << "  free_percentage: " << (free * 100.0 / map.data.size()) << "%\n";
+    yaml_file << "  unknown_percentage: " << (unknown * 100.0 / map.data.size()) << "%\n";
+    yaml_file.flush();
+    bool ok = yaml_file.good();
+    yaml_file.close();
+    if (!ok) { ROS_WARN("YAML stream error -- file may be incomplete: %s", filename.c_str()); return false; }
+    return true;
 }
 
 // ======================== 落盘: meta ========================
 void ManualPointCollector::writeMeta(const std::string& dir, const ros::Time& t_start,
-                                     const ros::Time& t_end, size_t n_frames) {
+                                     const ros::Time& t_end, size_t n_frames,
+                                     bool aborted, size_t angles_with_echo) {
     std::ofstream f(dir + "meta.txt", std::ios::out | std::ios::trunc);
     if (!f.is_open()) { ROS_WARN("cannot open meta.txt"); return; }
     std::time_t st = static_cast<std::time_t>(t_start.toSec());
@@ -794,7 +1074,15 @@ void ManualPointCollector::writeMeta(const std::string& dir, const ros::Time& t_
     f << "range_level=" << range_level_ << "\n"
       << "max_range_m=" << std::fixed << std::setprecision(3) << max_range_ << "\n"
       << "min_range_m=" << min_range_ << "\n"
-      << "scan_duration_cfg_s=" << scan_duration_ << "\n"
+      << "scan_mode=single_360_sweep_400angles\n"
+      << "sweep_complete=" << (aborted ? "false" : "true")
+      << " (false = did not cover all 400 angles: safety timeout or shutdown; cloud/summary PARTIAL)\n"
+      << "angles_with_echo=" << angles_with_echo << " of 400 (distinct angles with a non-empty return, not frame count)\n"
+      << "angle_timeout_sec=" << angle_timeout_sec_ << "\n"
+      << "scan_timeout_sec=" << scan_timeout_sec_ << " (safety ceiling only, not a timer)\n"
+      << "deliverable=~/sonar_logs/maps/phase_multi_submap_" << point_counter_ << "_pos" << point_counter_
+      << ".{pcd(binary)+pgm+yaml} (faithful to terminal-4 format/naming)\n"
+      << "local_extra=cloud.pcd in this dir is an ASCII copy (CloudCompare-openable; verifies the binary)\n"
       << "scan_elapsed_s=" << (t_end - t_start).toSec() << "\n"
       << "start_wall=" << sbuf << " (" << std::setprecision(6) << t_start.toSec() << ")\n"
       << "end_unix=" << t_end.toSec() << "\n"
