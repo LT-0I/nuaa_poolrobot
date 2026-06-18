@@ -51,6 +51,9 @@ public:
     // ========== 服务回调 ==========
     bool moveStraightCallback(sonar_slam::MoveStraight::Request& req,
                               sonar_slam::MoveStraight::Response& res);
+    // 下水自启: 旋转找侧壁 → 对齐 → 进入沿边 (/move_controller/find_wall)
+    bool findWallCallback(sonar_slam::MoveStraight::Request& req,
+                          sonar_slam::MoveStraight::Response& res);
 
     void initWalkLog(const std::string& log_type, float target_distance);
     void recordWalkData(float current_distance, float target_distance);
@@ -67,6 +70,16 @@ private:
      * @return true 成功，false 失败
      */
     bool walkStraightWithWallAvoidanceAdvanced(float distance, float max_speed, float timeout);
+
+    // ========== 下水自启 bootstrap: 旋转找侧壁 → 进入沿边 ==========
+    // 设备由人放入、初始离壁较近。Phase1: 原地慢扫偏航(纯差动、linear.x=0 绝不前进)直到右侧超声两路
+    //   有效且一致(机体≈平行于一面侧壁)且【正前净空】持续 confirm 秒 → 锁定可安全起步位姿。
+    //   正前净空同时解决"朝墙角"问题: 朝凹角的航向(右得墙但前也被墙挡)被拒, 继续转到右得墙且前净空
+    //   (沿该墙背离墙角)的航向才接受 → 起步绝不冲墙角(对应用户硬要求)。
+    // Phase2: 直接交已验证沿边串级 walkStraightWithWallAvoidanceAdvanced —— 其外环在前进中把距墙误差
+    //   (wall_align-d)折成有界航向偏置并收敛(=用户要的"移动修正右侧距离"), 拐角块处理前墙; 复用成品、
+    //   不另写易脆的盲横移闭距控制器。
+    bool findWallAndFollow(float follow_distance, float timeout);
     
     // ========== 初始化 ==========
     void initKeyboardSimulator();
@@ -145,6 +158,7 @@ private:
     ros::Subscriber imu_heading_sub_;   // /imu_heading 融合航向(度)，串级直行内环用
     ros::Subscriber pump_enable_sub_;   // /move_controller/pump_enable 运行级水泵闩锁(mapper 整段持泵)
     ros::ServiceServer move_straight_srv_;
+    ros::ServiceServer find_wall_srv_;   // /move_controller/find_wall 下水自启找侧壁
     ros::Timer keyboard_timer_;
     tf::TransformListener tf_listener_;
     
@@ -261,6 +275,14 @@ private:
     float  config_corner_slow_deg_       = 15.0f;  // 距目标此角内降到 fine
     float  config_corner_turn_timeout_   = 8.0f;   // 转向硬超时(s)
     float  config_corner_turn_cap_deg_   = 130.0f; // odom 角兜底上限(默认 turn+40°宽裕度): 仅兜 IMU 大故障/防过转, 不与 IMU 到位判据争紧裕度(评审 HIGH)
+
+    // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 构造期读一次; 启动前 rosparam set /xxx) =====
+    float config_findwall_omega_       = 0.18f;  // 找墙原地偏航角速度(cmd; ×6.4≈rad/s)。默认0.18(>拐角fine0.10的水下起转阈、≈coarse0.2);
+                                                 //   "停-核验"式采集使扫速不影响确认, 故取较快值保水下能转起。若仍不转抬向0.2+; 若嫌过冲降。
+    bool  config_findwall_turn_left_   = true;   // true=左转(CCW,angular>0,同拐角约定)扫; 仅影响找到墙的方向/快慢, 完整性两向皆360°内保证。
+    float config_findwall_confirm_sec_ = 0.4f;   // 候选位姿【停转后】右两路有效一致+前净空 须持续此时长才锁定(≈4帧@10Hz, 滤ZOH/单帧伪回波)。
+    float config_findwall_max_rot_deg_ = 540.0f; // 旋转累计上限(odom角, 1.5圈): 超此仍未锁定→近旁无可用侧壁、判失败(不盲走、由人重放)。
+    float config_findwall_timeout_     = 25.0f;  // 找墙阶段墙钟超时(s) 兜底。
 
     // 串级调参快照(主循环每拍更新, recordWalkData 1Hz 采样进 CSV)
     float dbg_imu_yaw_deg_  = 0.0f;

@@ -61,9 +61,15 @@ MoveController::MoveController() :
 
     // 创建服务服务器
     move_straight_srv_ = nh_.advertiseService(
-        "/move_controller/move_straight", 
+        "/move_controller/move_straight",
         &MoveController::moveStraightCallback, this);
     ROS_INFO("服务服务器: /move_controller/move_straight");
+
+    // 下水自启找侧壁服务: 旋转找侧壁 → 对齐 → 进入沿边
+    find_wall_srv_ = nh_.advertiseService(
+        "/move_controller/find_wall",
+        &MoveController::findWallCallback, this);
+    ROS_INFO("服务服务器: /move_controller/find_wall");
     
     // 初始化键盘模拟器
     initKeyboardSimulator();
@@ -150,8 +156,23 @@ MoveController::MoveController() :
     if (config_corner_turn_timeout_    < 1.0f)  config_corner_turn_timeout_    = 1.0f;
     if (config_wall_consistency_m_     < 0.05f) config_wall_consistency_m_     = 0.05f;
 
+    // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 启动前 rosparam set /xxx) =====
+    nh_.param("findwall_omega",       config_findwall_omega_,       0.18f);
+    nh_.param("findwall_turn_left",   config_findwall_turn_left_,   true);
+    nh_.param("findwall_confirm_sec", config_findwall_confirm_sec_, 0.4f);
+    nh_.param("findwall_max_rot_deg", config_findwall_max_rot_deg_, 540.0f);
+    nh_.param("findwall_timeout",     config_findwall_timeout_,     25.0f);
+    if (config_findwall_omega_       < 0.05f)   config_findwall_omega_       = 0.05f;
+    if (config_findwall_omega_       > 0.30f)   config_findwall_omega_       = 0.30f;
+    if (config_findwall_confirm_sec_ < 0.0f)    config_findwall_confirm_sec_ = 0.0f;
+    if (config_findwall_confirm_sec_ > 5.0f)    config_findwall_confirm_sec_ = 5.0f;
+    if (config_findwall_max_rot_deg_ < 90.0f)   config_findwall_max_rot_deg_ = 90.0f;
+    if (config_findwall_max_rot_deg_ > 1080.0f) config_findwall_max_rot_deg_ = 1080.0f;
+    if (config_findwall_timeout_     < 3.0f)    config_findwall_timeout_     = 3.0f;
+    if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
+
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-corner-fused-20260616 (IMU-heading inner + ultra-wall outer + fused-heading stop-turn corner)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-corner-fused-findwall-20260618 (IMU-heading inner + ultra-wall outer + fused-heading stop-turn corner + drop-in find-wall bootstrap)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -160,6 +181,9 @@ MoveController::MoveController() :
              (int)config_enable_corner_, config_corner_front_trigger_m_, config_corner_front_confirm_, config_corner_settle_sec_,
              config_corner_turn_deg_, config_corner_turn_omega_, config_corner_turn_omega_fine_, config_corner_slow_deg_,
              config_corner_turn_cap_deg_, config_corner_turn_timeout_);
+    ROS_INFO("  findwall(bootstrap): omega=%.2f turn_left=%d confirm=%.2fs max_rot=%.0fdeg timeout=%.1fs | acquire: right both valid & |rear-front|<%.2fm & front>=%.2fm",
+             config_findwall_omega_, (int)config_findwall_turn_left_, config_findwall_confirm_sec_,
+             config_findwall_max_rot_deg_, config_findwall_timeout_, config_wall_consistency_m_, config_corner_front_trigger_m_);
     ROS_INFO("========================================");
     ROS_INFO("MoveController 配置参数:");
     ROS_INFO("  speed = %.2f m/s", config_speed_);
@@ -213,6 +237,22 @@ bool MoveController::moveStraightCallback(sonar_slam::MoveStraight::Request& req
     res.actual_distance = success ? fabs(req.distance) : 0.0f;
     res.final_error = 0.0f;
     
+    return true;
+}
+
+// ==================== 服务回调: 下水自启找侧壁 ====================
+bool MoveController::findWallCallback(sonar_slam::MoveStraight::Request& req,
+                                      sonar_slam::MoveStraight::Response& res) {
+    // 复用 MoveStraight 服务类型: distance=找到墙对齐后沿边行走距离(默认 50m≈绕池足够), timeout=沿边阶段超时。
+    // 找墙旋转阶段另由 findwall_* 参数约束(见构造函数)。
+    float ftimeout = (req.timeout > 0) ? req.timeout : 60.0f;
+    float fdist    = (fabs(req.distance) > 0.01f) ? fabs(req.distance) : 50.0f;
+    ROS_INFO("[findwall] service request: follow_distance=%.2f timeout=%.1f", fdist, ftimeout);
+    bool success = findWallAndFollow(fdist, ftimeout);
+    res.success = success;
+    res.message = success ? "find_wall+follow ok" : "find_wall+follow failed";
+    res.actual_distance = success ? fdist : 0.0f;
+    res.final_error = 0.0f;
     return true;
 }
 
@@ -757,6 +797,184 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     saveWalkLog(success);
     return success;
 }
+// ==================== 下水自启: 旋转找侧壁 → 对齐 → 进入沿边 ====================
+// 安全铁律: 本相位纯原地偏航(linear.x=0 绝不前进), 全程 ≤0.05s 持续 publish(doc 沿边轨无 /cmd_vel 看门狗→失败即 stop() 发零, 不留残命令)。
+// 朝墙角 = 右得墙但前被挡 → 拒绝该航向继续转; 仅"右两路有效一致【且前净空】"才锁定 → 起步绝不冲墙(对应用户硬要求)。
+// 采集用"停-核验": 慢扫到候选航向先停转再核验, 使扫速不影响确认(镜面壁窄法向窗也不会被扫过漏掉)。
+bool MoveController::findWallAndFollow(float follow_distance, float timeout) {
+    if (move_state_ != 0) {
+        ROS_ERROR("[findwall] busy (move_state=%d) -> reject", move_state_);
+        return false;
+    }
+    const float DEG2RAD = M_PI / 180.0f;
+    const float RAD2DEG = 180.0f / M_PI;
+
+    ROS_WARN("========================================");
+    ROS_WARN("[findwall] bootstrap: rotate -> acquire RIGHT wall -> enter wall-follow");
+    ROS_WARN("  follow=%.2fm follow_timeout=%.1fs | omega=%.2f left=%d confirm=%.2fs max_rot=%.0fdeg acq_timeout=%.1fs",
+             follow_distance, timeout, config_findwall_omega_, (int)config_findwall_turn_left_,
+             config_findwall_confirm_sec_, config_findwall_max_rot_deg_, config_findwall_timeout_);
+    ROS_WARN("  acquire: right_front&right_rear both in(0.05,5.0)m & |rear-front|<%.2fm(fresh) & front min>=%.2fm",
+             config_wall_consistency_m_, config_corner_front_trigger_m_);
+    ROS_WARN("========================================");
+
+    disabling_timer_ = true;   // 接管 /cmd_vel 发布, 抑制键盘定时器(同 walkStraight)
+    move_state_ = 1;
+
+    if (!waitForOdom(5.0f)) {  // 需 odom 测累计转角(旋转上限兜底)
+        ROS_ERROR("[findwall] wait odom timeout -> abort (no motion committed)");
+        stop(); disabling_timer_ = false; move_state_ = 2;
+        return false;
+    }
+    for (int i = 0; i < 5 && ros::ok(); i++) { ros::spinOnce(); ros::Duration(0.05).sleep(); }
+    updateCurrentPose();
+
+    const float max_rot_rad = config_findwall_max_rot_deg_ * DEG2RAD;
+    const float omega = config_findwall_turn_left_ ? config_findwall_omega_ : -config_findwall_omega_;
+    // 泵(linear.y): ACQUIRE 为纯偏航侦察 → 旋转/停稳全程【强制关泵(0)、与是否闩锁无关】(评审 MEDIUM): 杜绝泵推力在原地转时
+    //   产生前向漂移、把离壁很近的机体顶上墙(本分支无 /cmd_vel 看门狗)。不改 run_pump_latched_ 闩锁态本身——失败 stop() 与
+    //   交回 walkStraight 时各自按 live 闩锁恢复泵, 故此处恒置 0 不扰闩锁。
+    const float pump = 0.0f;
+
+    ros::Time t0 = ros::Time::now();
+    float     rotated = 0.0f;
+    float     last_theta = current_pose_.theta;
+    bool      verifying = false;
+    ros::Time verify_start;
+    bool      acquired = false;
+    float     acq_d = -1.0f, acq_front = 999.0f;
+    // 进度看门狗状态(对齐拐角块 cpp 起转/停转见证): 命令在转却无物理推进 → 快速失败
+    bool      moving_started    = false;
+    float     last_progress_rot = 0.0f;
+    ros::Time last_progress_t   = t0;
+
+    while (ros::ok()) {
+        updateCurrentPose();
+        // 转角累计【无条件每拍, 含核验停转期】: odom 真实航向变化都计入(评审 HIGH: 原仅 SWEEP 计、漏核验期漂移→1.5圈上限偏乐观)。
+        // 仅作旋转上限兜底; dth<0.5rad 滤角度回卷(±π)突跳(正常每拍≈3°)。
+        {
+            float dth = fabs(normalizeAngle(current_pose_.theta - last_theta));
+            if (dth < 0.5f) rotated += dth;
+            last_theta = current_pose_.theta;
+            if (rotated > last_progress_rot + 2.0f * DEG2RAD) {   // 物理推进高水位(进度看门狗用)
+                last_progress_rot = rotated;
+                last_progress_t   = ros::Time::now();
+                moving_started    = true;
+            }
+        }
+        // 快照右侧+前方超声(与 ultraCallback 写侧同锁规则)
+        float rf, rr, fl, fr; ros::Time ustamp;
+        {
+            std::lock_guard<std::mutex> lk(sensor_mutex_);
+            rf = wall_sensors_.ultra_right_front;
+            rr = wall_sensors_.ultra_right_rear;
+            fl = wall_sensors_.infra_front_left;
+            fr = wall_sensors_.infra_front_right;
+            ustamp = ultra_right_stamp_;
+        }
+        bool rf_valid = (rf > 0.05f && rf < 5.0f);
+        bool rr_valid = (rr > 0.05f && rr < 5.0f);
+        bool ufresh   = (!ustamp.isZero() &&
+                         (ros::Time::now() - ustamp).toSec() < config_wall_stale_sec_);
+        bool consistent = (fabs(rr - rf) < config_wall_consistency_m_);
+        float front_dist = std::min(fl, fr);
+        // 前净空: front min 不落在 (0.05, trigger) 危险带; 999=无回波=净空。同 walkStraight 拐角触发口径, 保证起步后不立即误触发拐角。
+        bool front_clear = !(front_dist > 0.05f && front_dist < config_corner_front_trigger_m_);
+        bool right_hint = (rf_valid || rr_valid) && ufresh;             // 触发核验(宽: 任一路先现回波)
+        bool right_ok   = rf_valid && rr_valid && ufresh && consistent; // 锁定判据(严: 与外环 ultra_ok 同口径)
+
+        geometry_msgs::Twist cmd;
+        cmd.linear.x = 0.0f;        // 铁律: 找墙阶段绝不前进
+        cmd.linear.y = pump;
+        cmd.angular.z = 0.0f;
+
+        if (!verifying) {
+            // ---- SWEEP: 原地偏航(转角累计/进度看门狗已在循环顶部统一处理) ----
+            cmd.angular.z = omega;
+            if (right_hint && front_clear) {  // 右有墙且前净空 = 候选位姿 → 停转核验
+                verifying = true; verify_start = ros::Time::now();
+                cmd.angular.z = 0.0f;
+                ROS_INFO("[findwall] candidate @%.0fdeg (rf=%.2f rr=%.2f front=%.2f) -> stop & verify",
+                         rotated * RAD2DEG, rf, rr, front_dist);
+            } else if (right_hint && !front_clear) {
+                ROS_INFO_THROTTLE(1.0, "[findwall] right wall but front blocked(%.2fm)=facing corner -> keep rotating", front_dist);
+            } else {
+                ROS_INFO_THROTTLE(1.0, "[findwall] sweep @%.0fdeg (rf=%.2f rr=%.2f front=%.2f)",
+                                  rotated * RAD2DEG, rf, rr, front_dist);
+            }
+        } else {
+            // ---- VERIFY: 停转, 严判据须持续 confirm_sec 才锁定; 中断则回 SWEEP ----
+            last_progress_t = ros::Time::now();   // 核验=有意停转: 每拍重置进度看门狗计时, 不误判为电机 stall
+            cmd.angular.z = 0.0f;
+            if (right_ok && front_clear) {
+                if ((ros::Time::now() - verify_start).toSec() >= config_findwall_confirm_sec_) {
+                    acquired = true; acq_d = 0.5f * (rf + rr); acq_front = front_dist;
+                    break;   // 末态零速由下方停转稳定段发出
+                }
+            } else {
+                verifying = false; cmd.angular.z = omega;   // 核验中断(右不稳/不一致/前被挡)→继续转
+                ROS_INFO_THROTTLE(1.0, "[findwall] verify broke (right_ok=%d front_clear=%d) -> resume sweep",
+                                  (int)right_ok, (int)front_clear);
+            }
+        }
+
+        cmd_vel_pub_.publish(cmd);
+
+        // 上限兜底(不盲走/不冲墙): 转满上限或超时仍未锁定 → 失败
+        if (rotated >= max_rot_rad) {
+            ROS_ERROR("[findwall] rotated %.0fdeg (cap %.0f) without acquiring a usable side wall -> abort",
+                      rotated * RAD2DEG, config_findwall_max_rot_deg_);
+            break;
+        }
+        if ((ros::Time::now() - t0).toSec() > config_findwall_timeout_) {
+            ROS_ERROR("[findwall] acquire timeout %.1fs -> abort", config_findwall_timeout_);
+            break;
+        }
+        // 进度看门狗(评审 CONFIRMED-HIGH + MEDIUM): 命令在转却无物理推进 → 快速失败, 不在近壁久转。
+        //   覆盖: ① omega 可能低于水下电机起转阈(转不动)→ 原本要空转到 25s 超时才停; ② odom 冻结使旋转上限永不触发。
+        //   核验停转期已每拍重置 last_progress_t, 故不会把"有意停转"误判 stall。失败路径仍 stop()+不前进, 安全。
+        if (moving_started && (ros::Time::now() - last_progress_t).toSec() > 1.5) {
+            ROS_ERROR("[findwall] rotation STALLED (no >2deg yaw for 1.5s; motor below water start threshold? raise findwall_omega) -> abort");
+            break;
+        } else if (!moving_started && (ros::Time::now() - t0).toSec() > 2.5) {
+            ROS_ERROR("[findwall] rotation NEVER STARTED (no physical yaw in 2.5s; omega too low / motor stall) -> abort");
+            break;
+        }
+
+        ros::spinOnce();
+        ros::Duration(0.05).sleep();
+    }
+
+    // 停转稳定: 持续发零(非盲 sleep)
+    {
+        ros::Time q0 = ros::Time::now();
+        while (ros::ok() && (ros::Time::now() - q0).toSec() < 0.3) {
+            geometry_msgs::Twist z;
+            z.linear.x = 0.0f; z.linear.y = pump; z.angular.z = 0.0f;
+            cmd_vel_pub_.publish(z);
+            ros::spinOnce();
+            ros::Duration(0.05).sleep();
+        }
+        updateCurrentPose();
+    }
+
+    if (!acquired) {
+        stop();
+        disabling_timer_ = false;
+        move_state_ = 2;
+        ROS_ERROR("[findwall] FAILED to acquire a usable side wall (no forward motion committed). Reposition robot near a wall and retry.");
+        return false;
+    }
+
+    ROS_WARN("[findwall] ACQUIRED right wall: d~%.2fm, front clear(%.2fm). Hand off to wall-follow for %.2fm.",
+             acq_d, acq_front, follow_distance);
+    // 交回沿边串级: 复位 move_state_ 让 walkStraight 守卫通过(disabling_timer_ 保持真, walkStraight 内自再置真→末了置假)。
+    // 用户要的"移动修正右侧超声距离"由 walkStraight 外环在前进中完成(wall_align-d 折成有界航向偏置渐收敛),
+    // 拐角块继续防前墙撞击; 复用成品、不另写易脆盲横移闭距控制器。
+    move_state_ = 0;
+    return walkStraightWithWallAvoidanceAdvanced(follow_distance, config_speed_, timeout);
+}
+
 // ==================== 键盘模拟器初始化 ====================
 void MoveController::initKeyboardSimulator() {
     std::lock_guard<std::mutex> lock(keyboard_mutex_);
