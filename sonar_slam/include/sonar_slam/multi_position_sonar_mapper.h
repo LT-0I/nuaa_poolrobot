@@ -642,6 +642,10 @@ private:
     bool move_completed_;
      // 移动服务客户端
     ros::ServiceClient move_straight_client_;
+    ros::ServiceClient find_wall_client_;     // /move_controller/find_wall (acquire_wall_first 用)
+    std::string session_dir_;                 // 本次运行智能会话目录 ~/sonar_logs/scan_<时间>/ (maps/raw_sonar/odom 全落此)
+    bool acquire_wall_first_ = false;         // 扫描前先找墙对齐(默认关; 沿边+声呐入口置真)
+    float acquire_distance_ = 0.5f;           // 找墙对齐后先沿边行走距离(米)
     ros::Publisher pump_enable_pub_;          // /move_controller/pump_enable 运行级水泵闩锁(std_msgs::Bool, latched)
     bool pump_latch_published_open_ = false;  // 幂等闸: 防重复 open/close
 

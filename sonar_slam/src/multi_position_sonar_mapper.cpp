@@ -42,12 +42,17 @@
 #include <sstream>
 #include <fstream>
 #include <chrono>
+#include <ctime>      // 会话目录时间戳 strftime/localtime
+#include <cstdio>     // snprintf(localtime 兜底分支)
 
 #include <locale>
 #include <codecvt>
 #include <algorithm>  // 如果需要使用 std::min/max
 #include <cmath>      // 数学函数
 #include <limits>     // FLT_MAX
+
+// 版本横幅(grep 自判): 改行为必改此串。本轮= 沿边+声呐采集入口(智能会话目录 + 可选找墙自启)
+#define MULTIMAP_VERSION "wallscan-smartdir-acquire-20260621"
 
 namespace sonar_slam {
 
@@ -225,6 +230,9 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     nh_.param("phase1/wait_duration", phase_multi_wait_duration_, 60.0f);
     nh_.param("phase1/move_distance", phase_multi_move_distance_, 2.0f);
     nh_.param("phase1/required_circles", phase_multi_circles_per_position_, 1);
+    // 沿边+声呐入口: 扫描前先找墙对齐(下水自启), 默认关; 由 wall_follow_sonar_scan.launch 置真。命名空间沿用 phase1/
+    nh_.param("phase1/acquire_wall_first", acquire_wall_first_, false);
+    nh_.param("phase1/acquire_distance", acquire_distance_, 0.5f);
     
  
     
@@ -256,16 +264,25 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     phase1_submaps_.reserve(20);        // 足够安全
     phase_multi_submaps_.reserve(100);   // 足够安全
 
-    // 打开 odom 日志文件
-    std::string home_dir = getenv("HOME");
-    std::string log_dir = home_dir + "/sonar_logs";
-    std::string odom_log_path = log_dir + "/sonar_odom_log.csv";
-
-    struct stat st;
-    if (stat(log_dir.c_str(), &st) != 0) {
-        mkdir(log_dir.c_str(), 0755);
+    // ===== 智能会话目录: 每次运行一个带时间戳子目录, 避免多次运行互相覆盖(maps/raw_sonar/odom 全落本目录) =====
+    {
+        const char* home_env = getenv("HOME");
+        std::string home_dir = home_env ? home_env : "/tmp";
+        char tbuf[32] = {0};
+        std::time_t tt = std::time(nullptr);
+        std::tm* lt = std::localtime(&tt);
+        if (lt) std::strftime(tbuf, sizeof(tbuf), "%Y%m%d_%H%M%S", lt);
+        else    snprintf(tbuf, sizeof(tbuf), "%u", static_cast<unsigned>(tt));
+        std::string base_root = home_dir + "/sonar_logs/";
+        session_dir_ = base_root + "scan_" + tbuf + "/";
+        struct stat st0;
+        if (stat(base_root.c_str(), &st0) != 0)    mkdir(base_root.c_str(), 0755);
+        if (stat(session_dir_.c_str(), &st0) != 0) mkdir(session_dir_.c_str(), 0755);
+        ROS_INFO("[%s] sonar session dir: %s", MULTIMAP_VERSION, session_dir_.c_str());
     }
 
+    // 打开 odom 日志文件(落在本次会话目录)
+    std::string odom_log_path = session_dir_ + "sonar_odom_log.csv";
     odom_log_file_.open(odom_log_path, std::ios::out | std::ios::app);
     if (odom_log_file_.is_open()) {
         odom_log_file_ << "timestamp,submap_index,position,pose_x,pose_y,pose_theta_deg,pointcloud_file\n";
@@ -275,7 +292,10 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     ros::NodeHandle nh_global;
     move_straight_client_ = nh_global.serviceClient<sonar_slam::MoveStraight>(
         "/move_controller/move_straight");
-    
+    // 找墙服务(可选 acquire_wall_first 用); 复用 MoveStraight srv: distance=对齐后沿边距离, timeout=超时
+    find_wall_client_ = nh_global.serviceClient<sonar_slam::MoveStraight>(
+        "/move_controller/find_wall");
+
     ROS_INFO("等待move_controller服务...");
     if (move_straight_client_.waitForExistence(ros::Duration(5.0))) {
         ROS_INFO("✅ move_controller服务已就绪");
@@ -3360,9 +3380,9 @@ void MultiPositionSonarMapper::saveCurrentPhaseMultiSubmap() {
     saveRawSonarData(raw_filename, current_pos);
 
     
-    std::string home_dir = getenv("HOME");
-    std::string sonar_logs_dir = home_dir + "/sonar_logs/";
-    
+    // 回环检测扫本次会话目录(智能子目录), 与本次写入的 maps 一致, 不混入历史运行
+    std::string sonar_logs_dir = session_dir_;
+
     ROS_INFO("执行回环检测，目录: %s", sonar_logs_dir.c_str());
     
     auto start = std::chrono::steady_clock::now();
@@ -3765,7 +3785,25 @@ void MultiPositionSonarMapper::startPhaseMultiMapping(int num_positions) {
     phase_multi_circles_per_position_ = 1;
     // 清空数据
     clearScanData();
-    
+
+    // 可选: 扫描前先找墙对齐(下水自启找侧壁), 默认关; 沿边+声呐入口可置真。找墙=标准 find_wall 服务(同 step3 独立行为)
+    // 注意: 开启时本步会驱动机器人(旋转找墙 + 沿边 acquire_distance 米)后再扫描, 须 step3 找墙已现场验证、右超声映射已标定
+    if (acquire_wall_first_) {
+        ROS_WARN("[acquire] WILL DRIVE robot: rotate to find wall then follow %.2fm before scan", acquire_distance_);
+        sonar_slam::MoveStraight fw;
+        fw.request.distance = acquire_distance_;
+        fw.request.timeout = 60.0f;
+        if (!find_wall_client_.waitForExistence(ros::Duration(5.0)) ||
+            !find_wall_client_.call(fw) || !fw.response.success) {
+            ROS_ERROR("[acquire] find_wall failed -> abort task (align robot at wall or set phase1/acquire_wall_first=false)");
+            closePumpLatch();   // 防御性撤闩(本路径闩锁尚未开, 幂等 no-op; 固化"中止必撤闩"不变量)
+            phase_multi_enabled_ = false;
+            phase_multi_step_ = 0;
+            return;
+        }
+        ROS_INFO("[acquire] wall acquired, start scan loop");
+    }
+
     // 启动扫描
     ROS_INFO("启动扫描线程...");
     startScanning();
@@ -3919,52 +3957,34 @@ int MultiPositionSonarMapper::getNextPositionIndex() const {
 }
 
 std::string MultiPositionSonarMapper::getMapsDirectory() {
-    std::string home_dir = getenv("HOME");
-    std::string base_dir = home_dir + "/sonar_logs/";
-    std::string maps_dir = base_dir + "maps/";
-    
+    // 智能会话目录: 落在本次运行 scan_<时间>/maps/ (session_dir_ 构造期已建, 防多次运行覆盖)
+    std::string maps_dir = session_dir_ + "maps/";
     struct stat st;
-    if (stat(base_dir.c_str(), &st) != 0) {
-        mkdir(base_dir.c_str(), 0755);
-    }
     if (stat(maps_dir.c_str(), &st) != 0) {
         mkdir(maps_dir.c_str(), 0755);
     }
-    
     return maps_dir;
 }
 
 std::string MultiPositionSonarMapper::getRawSonarDirectory() {
-    std::string home_dir = getenv("HOME");
-    std::string base_dir = home_dir + "/sonar_logs/";
-    std::string raw_dir = base_dir + "raw_sonar/";
-    
+    // 智能会话目录: 落在本次运行 scan_<时间>/raw_sonar/
+    std::string raw_dir = session_dir_ + "raw_sonar/";
     struct stat st;
-    if (stat(base_dir.c_str(), &st) != 0) {
-        mkdir(base_dir.c_str(), 0755);
-    }
     if (stat(raw_dir.c_str(), &st) != 0) {
         mkdir(raw_dir.c_str(), 0755);
     }
-    
     return raw_dir;
 }
   
 bool MultiPositionSonarMapper::saveRawSonarData(const std::string& filename, int position) {
     try {
-        // 创建目录
-        std::string home_dir = getenv("HOME");
-        std::string log_dir = home_dir + "/sonar_logs/";
-        std::string raw_dir = log_dir + "raw_sonar/";
-        
+        // 创建目录(智能会话目录 scan_<时间>/raw_sonar/)
+        std::string raw_dir = session_dir_ + "raw_sonar/";
         struct stat st;
-        if (stat(log_dir.c_str(), &st) != 0) {
-            mkdir(log_dir.c_str(), 0755);
-        }
         if (stat(raw_dir.c_str(), &st) != 0) {
             mkdir(raw_dir.c_str(), 0755);
         }
-        
+
         std::string filepath = raw_dir + filename + ".csv";
         std::ofstream raw_file(filepath);
         
