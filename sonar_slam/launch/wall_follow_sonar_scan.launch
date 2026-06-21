@@ -40,6 +40,7 @@
   <arg name="speed"             default="0.25"/>          <!-- 沿边前进线速度(m/s) [step1] -->
   <arg name="pump_speed"        default="0.4"/>           <!-- 水泵占空(下水推进) [step1] -->
   <arg name="corner_use_wall_dist" default="true"/>      <!-- 前墙触发距离跟随 wall_align(走够离墙距即停转) [step2] -->
+  <arg name="enable_corner"     default="true"/>          <!-- 绕角停-转总开关; 须显式钉住: move_controller 构造期读全局 /enable_corner, 不钉会吃 rosmaster 残留(如 §1 单测设过 false 未重启) -->
 
   <!-- move_controller 整定参数: 必须置"全局"(顶层 <param>), 否则被忽略(见上方命名空间注意) -->
   <param name="wall_align"           value="$(arg wall_align)"/>
@@ -49,6 +50,7 @@
   <param name="speed"                value="$(arg speed)"/>
   <param name="pump_speed"           value="$(arg pump_speed)"/>
   <param name="corner_use_wall_dist" value="$(arg corner_use_wall_dist)"/>
+  <param name="enable_corner"        value="$(arg enable_corner)"/>
 
   <!-- 沿边控制器: 提供 /move_controller/move_straight + /move_controller/find_wall (读上方全局参数) -->
   <node pkg="sonar_slam" type="move_controller_node" name="move_controller_node" output="screen"/>

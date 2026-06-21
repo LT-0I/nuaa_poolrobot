@@ -173,7 +173,7 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-corner-walldist-log-20260621 (corner trigger follows wall_align; per-run log to $HOME/sonar_logs/move_logs with wall params in filename)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-findwall-frontclear-fix-20260621 (corner trigger follows wall_align; findwall front-clear uses SAME trig as corner so acquire hands off without spurious turn; per-run log to $HOME/sonar_logs/move_logs)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -182,9 +182,10 @@ MoveController::MoveController() :
              (int)config_enable_corner_, config_corner_front_trigger_m_, config_corner_front_confirm_, config_corner_settle_sec_,
              config_corner_turn_deg_, config_corner_turn_omega_, config_corner_turn_omega_fine_, config_corner_slow_deg_,
              config_corner_turn_cap_deg_, config_corner_turn_timeout_);
-    ROS_INFO("  findwall(bootstrap): omega=%.2f turn_left=%d confirm=%.2fs max_rot=%.0fdeg timeout=%.1fs | acquire: right both valid & |rear-front|<%.2fm & front>=%.2fm",
+    ROS_INFO("  findwall(bootstrap): omega=%.2f turn_left=%d confirm=%.2fs max_rot=%.0fdeg timeout=%.1fs | acquire: right both valid & |rear-front|<%.2fm & front>=%.2fm(eff; =wall_align when corner_use_wall_dist)",
              config_findwall_omega_, (int)config_findwall_turn_left_, config_findwall_confirm_sec_,
-             config_findwall_max_rot_deg_, config_findwall_timeout_, config_wall_consistency_m_, config_corner_front_trigger_m_);
+             config_findwall_max_rot_deg_, config_findwall_timeout_, config_wall_consistency_m_,
+             (config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_));
     ROS_INFO("========================================");
     ROS_INFO("MoveController 配置参数:");
     ROS_INFO("  speed = %.2f m/s", config_speed_);
@@ -821,8 +822,9 @@ bool MoveController::findWallAndFollow(float follow_distance, float timeout) {
     ROS_WARN("  follow=%.2fm follow_timeout=%.1fs | omega=%.2f left=%d confirm=%.2fs max_rot=%.0fdeg acq_timeout=%.1fs",
              follow_distance, timeout, config_findwall_omega_, (int)config_findwall_turn_left_,
              config_findwall_confirm_sec_, config_findwall_max_rot_deg_, config_findwall_timeout_);
-    ROS_WARN("  acquire: right_front&right_rear both in(0.05,5.0)m & |rear-front|<%.2fm(fresh) & front min>=%.2fm",
-             config_wall_consistency_m_, config_corner_front_trigger_m_);
+    ROS_WARN("  acquire: right_front&right_rear both in(0.05,5.0)m & |rear-front|<%.2fm(fresh) & front min>=%.2fm(eff; =wall_align when corner_use_wall_dist)",
+             config_wall_consistency_m_,
+             (config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_));
     ROS_WARN("========================================");
 
     disabling_timer_ = true;   // 接管 /cmd_vel 发布, 抑制键盘定时器(同 walkStraight)
@@ -885,8 +887,11 @@ bool MoveController::findWallAndFollow(float follow_distance, float timeout) {
                          (ros::Time::now() - ustamp).toSec() < config_wall_stale_sec_);
         bool consistent = (fabs(rr - rf) < config_wall_consistency_m_);
         float front_dist = std::min(fl, fr);
-        // 前净空: front min 不落在 (0.05, trigger) 危险带; 999=无回波=净空。同 walkStraight 拐角触发口径, 保证起步后不立即误触发拐角。
-        bool front_clear = !(front_dist > 0.05f && front_dist < config_corner_front_trigger_m_);
+        // 前净空: front min 不落在 (0.05, trig) 危险带; 999=无回波=净空。trig 须同 walkStraight 拐角触发口径
+        // (corner_use_wall_dist? wall_align : corner_front_trigger_m), 否则净空阈(旧钉死1.5)< 拐角阈(3.0)时,
+        // 找墙会在 front∈[1.5,3.0) 处判净空锁定 -> 交回沿边 has_front_wall=true 立即误触发拐角、把刚找到的墙转开。
+        float front_trig = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
+        bool front_clear = !(front_dist > 0.05f && front_dist < front_trig);
         bool right_hint = (rf_valid || rr_valid) && ufresh;             // 触发核验(宽: 任一路先现回波)
         bool right_ok   = rf_valid && rr_valid && ufresh && consistent; // 锁定判据(严: 与外环 ultra_ok 同口径)
 
