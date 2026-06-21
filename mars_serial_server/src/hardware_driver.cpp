@@ -159,8 +159,8 @@ void HardwareDriver::rosNode()
     if (max_motor_cmd_   <= 0)   max_motor_cmd_   = 300;
     if (cmd_vel_timeout_ <= 0.0) cmd_vel_timeout_ = 0.5;
     cmd_vel_received_ = false;
-    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v2-20260621，track_bias 默认 0.1）
-    ROS_WARN("[vcu] hardware_driver VCU-v2-20260621 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
+    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v3-20260621，track_bias 默认 0.1 且仅平移时补偿）
+    ROS_WARN("[vcu] hardware_driver VCU-v3-20260621 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
              omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_);
 
     keyboardVel_cmd_sub_ = nh_.subscribe("cmd_vel", 100, &HardwareDriver::sendKeyboardVelCommand, this);
@@ -1876,12 +1876,13 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     double right_speed = v + w * half_track;
     double left_speed  = v - w * half_track;
 
-    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0.1 -> 右减左增治左偏）
+    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0.1 -> 右减左增治左偏）。
     //    track_bias>0：右减左增（治“总向左偏”）；<0 反之。
-    //    注意：对所有 /cmd_vel 生效（含 rect/zig 原地转向→左右约 22% 不对称、转向期略偏心；
-    //          闭环到航向仍能转到位，仅轻微位移。若要纯原地转可改为仅 v!=0 时补偿。）
-    right_speed *= (1.0 - track_bias_);
-    left_speed  *= (1.0 + track_bias_);
+    //    仅在有平移分量(|v|>eps)时补偿：纯原地转向(v≈0, rect/zig 拐角)不加偏置 -> 左右对称、转向不偏心。
+    if (fabs(v) > 1e-3) {
+        right_speed *= (1.0 - track_bias_);
+        left_speed  *= (1.0 + track_bias_);
+    }
 
     // 4. 方向标志（喂里程计）：用补偿后的速度符号，与实际下发命令一致；|bias|<=0.15 不翻号。
     flagdirR = (right_speed >= 0) ? 1 : -1;
