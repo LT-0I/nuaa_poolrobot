@@ -154,7 +154,7 @@ void HardwareDriver::rosNode()
 
     // ===== [terminal4] 差速配平+限幅 / /cmd_vel 看门狗 / 融合航向注入 参数 (默认=保持现行为, 经 serial_server.launch 调) =====
     nh_.param("omega_gain",      omega_gain_,      6.4);
-    nh_.param("track_bias",      track_bias_,      0.0);
+    nh_.param("track_bias",      track_bias_,      0.1);   // 现场实测默认(治"总向左偏":右减左增); 仅平移时补偿(下方门控); 钳 +-0.15
     nh_.param("motor_scale",     motor_scale_,     230.0);
     nh_.param("max_track_speed", max_track_speed_, 1.0);
     nh_.param("max_motor_cmd",   max_motor_cmd_,   300);
@@ -172,7 +172,7 @@ void HardwareDriver::rosNode()
     if (fused_heading_kc_ < 0.0) fused_heading_kc_ = 0.0;
     if (fused_heading_kc_ > 0.5) fused_heading_kc_ = 0.5;
     fused_heading_init_ = false;
-    ROS_WARN("[terminal4] driver-merge 20260615 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track=%.2f max_motor=%d cmd_vel_timeout=%.2f | fused=%d sign=%+d kc=%.3f",
+    ROS_WARN("[terminal4] driver-merge-20260621 (track_bias default 0.1, compensate only when translating) omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track=%.2f max_motor=%d cmd_vel_timeout=%.2f | fused=%d sign=%+d kc=%.3f",
              omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_,
              (int)use_fused_heading_, fused_heading_sign_, fused_heading_kc_);
 
@@ -1537,11 +1537,13 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     // cout << "right_speed " << right_speed << endl;
     // cout << "left_speed " << left_speed << endl;
 
-    // [terminal4] 左右履带静态偏置补偿(track_bias_, 默认0=不补偿; >0:右减左增治"总向左偏") + 限幅 + 可调标度
-    //   默认下: 工作区间(|轮速|<=max_track_speed=1.0)与原 *230 逐位等价(评审 200k 采样核验);
-    //   超 1.0 才限幅(原无限幅、直送电机), 实测命令(走直<=0.27/沿边角速度小)远在区间内。launch 设 track_bias:=0.1 复现实测走直。
-    right_speed *= (1.0 - track_bias_);
-    left_speed  *= (1.0 + track_bias_);
+    // [terminal4] 左右履带静态偏置补偿(track_bias_, 默认0.1 治"总向左偏":右减左增; 仅平移时补偿、纯原地转不加) + 限幅 + 可调标度
+    //   工作区间(|轮速|<=max_track_speed=1.0)与原 *230 等价; 超 1.0 才限幅(原无限幅、直送电机), 实测命令(走直<=0.27/沿边角速度小)远在区间内。
+    //   门控: 转向(linear.x=0)走航向闭环, 最终转角不受偏置影响; 偏置只会给原地转加偏心平移, 故 |v|<=1e-3 时跳过、保持干净对称。
+    if (fabs(current_speed_command) > 1e-3) {
+        right_speed *= (1.0 - track_bias_);
+        left_speed  *= (1.0 + track_bias_);
+    }
     right_speed = t4_clampd(right_speed, -max_track_speed_, max_track_speed_);
     left_speed  = t4_clampd(left_speed,  -max_track_speed_, max_track_speed_);
     motor_command.right_speed = t4_clampi((int)( right_speed * motor_scale_), -max_motor_cmd_, max_motor_cmd_);
