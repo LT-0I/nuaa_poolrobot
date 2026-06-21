@@ -1878,7 +1878,9 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
 
     // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0.1 -> 右减左增治左偏）。
     //    track_bias>0：右减左增（治“总向左偏”）；<0 反之。
-    //    仅在有平移分量(|v|>eps)时补偿：纯原地转向(v≈0, rect/zig 拐角)不加偏置 -> 左右对称、转向不偏心。
+    //    仅在有平移分量(|v|>eps)时补偿：纯原地转向(v≈0, rect/zig 拐角)不加偏置 -> 转向命令左右对称。
+    //    注：转向走 /imu_heading 航向闭环，最终转角不受偏置有无影响；偏置只会给转向中车体加一点
+    //        偏心平移(~b*w*half_track)，对闭环到位的转角精度无影响，故此处加否均可、取干净对称命令。
     if (fabs(v) > 1e-3) {
         right_speed *= (1.0 - track_bias_);
         left_speed  *= (1.0 + track_bias_);
