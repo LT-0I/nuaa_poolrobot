@@ -4,7 +4,7 @@
 #include <csignal>      // [heading-straight-pd] signal/SIG_IGN/SIGINT/SIGTERM；SIGHUP/SIGPIPE 由 Linux <signal.h> 提供
 
 // [heading-straight-pd] 版本闸门：改功能必升版本，操作单 grep 自判
-#define CODE_VERSION "heading-straight-pd-v5-speedcap0p4-20260614"
+#define CODE_VERSION "heading-straight-pd-v6-rect-z-20260620"
 
 // [heading-straight-pd] 自管 SIGINT/SIGTERM/SIGHUP：退出前补发零速，防驱动保持最后指令（驱动无看门狗，D-29）
 static volatile sig_atomic_t g_hs_stop = 0;
@@ -172,7 +172,14 @@ void MotionController::rosNode()
     // 全部参数走私有句柄 ~ → 命令行 _name:=value 可覆盖、免重编。
     std::string control_mode;
     pnh_.param<std::string>("control_mode", control_mode, std::string("legacy"));
-    heading_mode_ = (control_mode == std::string("heading_straight"));
+    // [rect-z] heading 家族: heading_straight(原单段) / rectangle(矩形) / zigzag(Z弓字形)
+    // 三者共用同一套 PD 直行+航向保持机理; rectangle/zigzag 仅在段末加原地转向(段序列)。
+    heading_mode_ = (control_mode == std::string("heading_straight") ||
+                     control_mode == std::string("rectangle") ||
+                     control_mode == std::string("zigzag"));
+    if      (control_mode == std::string("rectangle")) path_mode_ = PATH_RECT;
+    else if (control_mode == std::string("zigzag"))    path_mode_ = PATH_ZIGZAG;
+    else                                               path_mode_ = PATH_SINGLE;
 
     pnh_.param<double>("heading_kp",        h_kp_,               0.15);
     pnh_.param<double>("heading_kd",        h_kd_,               0.0);
@@ -197,6 +204,42 @@ void MotionController::rosNode()
     pnh_.param<std::string>("log_path",     h_log_path_,         std::string("/tmp/heading_straight_log.csv"));
     h_sign_ = (h_sign_ >= 0) ? 1 : -1;
 
+    // [rect-z] 段序列(矩形/Z) + 原地转向参数。仅 rectangle/zigzag 用; 启动前 rosparam set, 构造期只读一次。
+    pnh_.param<double>("rect_side_a",      rect_side_a_,        2.0);
+    pnh_.param<double>("rect_side_b",      rect_side_b_,        rect_side_a_);   // 默认正方形
+    pnh_.param<int>   ("rect_laps",        rect_laps_,          1);
+    pnh_.param<double>("zig_leg",          zig_leg_,            3.0);
+    pnh_.param<double>("zig_shift",        zig_shift_,          0.5);
+    pnh_.param<int>   ("zig_legs",         zig_legs_,           4);
+    pnh_.param<int>   ("turn_dir",         turn_dir_,           1);
+    pnh_.param<double>("turn_deg",         turn_deg_,           90.0);
+    pnh_.param<double>("turn_omega",       hs_turn_omega_,      0.20);
+    pnh_.param<double>("turn_omega_fine",  hs_turn_omega_fine_, 0.08);
+    pnh_.param<double>("turn_settle_s",    hs_turn_settle_s_,   1.0);
+    pnh_.param<double>("turn_timeout_s",   hs_turn_timeout_s_,  25.0);
+    pnh_.param<double>("turn_stall_s",     hs_turn_stall_s_,    3.0);
+    double turn_tol_deg, turn_fine_deg, turn_progress_eps_deg;
+    pnh_.param<double>("turn_tol_deg",          turn_tol_deg,          3.0);
+    pnh_.param<double>("turn_fine_deg",         turn_fine_deg,         15.0);
+    pnh_.param<double>("turn_progress_eps_deg", turn_progress_eps_deg, 2.0);
+    turn_dir_             = (turn_dir_ >= 0) ? 1 : -1;
+    hs_turn_tol_          = turn_tol_deg          * PI_M / 180.0;
+    hs_turn_fine_band_    = turn_fine_deg         * PI_M / 180.0;
+    hs_turn_progress_eps_ = turn_progress_eps_deg * PI_M / 180.0;
+
+    // [rect-z] 段几何/转角参数防御性钳位(评审收敛 MINOR/NIT): 负边长/横移会让 hypot 距离判据首拍即真→空跑收尾;
+    // turn_deg 超界 wrap 后日志误导; settle 过大会让段间永久停滞且无超时(评审 B MAJOR-2)。均钳到安全区。
+    if (rect_side_a_ < 0.0) rect_side_a_ = 0.0;
+    if (rect_side_b_ < 0.0) rect_side_b_ = 0.0;
+    if (zig_leg_     < 0.0) zig_leg_     = 0.0;
+    if (zig_shift_   < 0.0) zig_shift_   = 0.0;
+    if (turn_deg_ <   0.0) turn_deg_ =   0.0;
+    if (turn_deg_ > 180.0) turn_deg_ = 180.0;
+    if (hs_turn_settle_s_  < 0.0)  hs_turn_settle_s_  = 0.0;
+    if (hs_turn_settle_s_  > 10.0) hs_turn_settle_s_  = 10.0;
+    if (hs_turn_timeout_s_ < 1.0)  hs_turn_timeout_s_ = 1.0;
+    if (hs_turn_stall_s_   < 0.5)  hs_turn_stall_s_   = 0.5;
+
     // 命令行速度/角速度硬钳, 防操作单笔误一位(0.4→4.0)在控制器侧就直达 /cmd_vel。
     // straight_speed 上限 0.4: 为测"加缓启动后 >0.3(0.3~0.4) 能否压住履带打滑"开放到 0.4; 0.4 直行峰值
     // 轨速 ~0.59 m/s、电机命令 ~136, 正常工作区内, 远未触及驱动兜底阈值(max_track_speed=1.0/max_motor_cmd=300),
@@ -212,6 +255,10 @@ void MotionController::rosNode()
         if (h_pump_speed_  > 1.0) h_pump_speed_  = 1.0;
         if (h_softstart_s_ < 0.0)  h_softstart_s_ = 0.0;  // 缓启动斜坡 [0,10]s
         if (h_softstart_s_ > 10.0) h_softstart_s_ = 10.0;
+        if (hs_turn_omega_      < 0.0) hs_turn_omega_      = 0.0;   // [rect-z] 转速钳 [0,0.3]，同 omega 安全上限
+        if (hs_turn_omega_      > 0.3) hs_turn_omega_      = 0.3;
+        if (hs_turn_omega_fine_ < 0.0) hs_turn_omega_fine_ = 0.0;
+        if (hs_turn_omega_fine_ > hs_turn_omega_) hs_turn_omega_fine_ = hs_turn_omega_;   // 慢转速不超主转速
         if (sp0 != h_speed_ || om0 != h_omega_limit_ || pm0 != h_pump_speed_)
             ROS_WARN("[hs] param out of range, clamped: straight_speed %.3f->%.3f, omega_limit %.3f->%.3f, pump_speed %.3f->%.3f",
                      sp0, h_speed_, om0, h_omega_limit_, pm0, h_pump_speed_);
@@ -233,7 +280,8 @@ void MotionController::rosNode()
         // 启动横幅：CODE_VERSION + 全部生效参数（grep 自判，防 _param 拼错静默回默认）
         ROS_WARN("==================== [heading-straight-pd] ENABLED ====================");
         ROS_WARN("CODE_VERSION=%s", CODE_VERSION);
-        ROS_WARN("control_mode=heading_straight  yaw_topic=%s  cmd_topic=%s",
+        ROS_WARN("control_mode=%s  yaw_topic=%s  cmd_topic=%s",
+                 (path_mode_ == PATH_SINGLE ? "heading_straight" : (path_mode_ == PATH_RECT ? "rectangle" : "zigzag")),
                  h_yaw_topic_.c_str(), h_cmd_topic_.c_str());
         ROS_WARN("Kp=%.4f Kd=%.4f Ki=%.4f i_clamp=%.3f heading_sign=%d",
                  h_kp_, h_kd_, h_ki_, h_i_clamp_, h_sign_);
@@ -244,6 +292,32 @@ void MotionController::rosNode()
         ROS_WARN("pause_every_s=%.1f pause_duration_s=%.1f drift_comp=%d",
                  h_pause_every_s_, h_pause_duration_s_, (int)h_drift_comp_);
         ROS_WARN("yaw_timeout=%.2f log_path=%s", h_yaw_timeout_, h_log_path_.c_str());
+        // [rect-z] 矩形/Z 模式: 构建段表 + 打印生效参数 (ASCII, 机上无中文字库; grep 自判防 _param 拼错回默认)
+        if (path_mode_ != PATH_SINGLE) {
+            hsBuildSegments();
+            ROS_WARN("PATH_MODE=%s segments=%d turn_dir=%d turn_deg=%.0f turn_omega=%.2f/%.2f tol=%.1fdeg settle=%.1fs timeout=%.1fs",
+                     (path_mode_ == PATH_RECT ? "RECTANGLE" : "ZIGZAG"), (int)hs_segs_.size(),
+                     turn_dir_, turn_deg_, hs_turn_omega_, hs_turn_omega_fine_,
+                     hs_turn_tol_ * 180.0 / PI_M, hs_turn_settle_s_, hs_turn_timeout_s_);
+            if (path_mode_ == PATH_RECT)
+                ROS_WARN("RECT side_a=%.2f side_b=%.2f laps=%d (legs=%d)", rect_side_a_, rect_side_b_, rect_laps_, (int)hs_segs_.size());
+            else
+                ROS_WARN("ZIGZAG leg=%.2f shift=%.2f legs=%d (segments=%d)", zig_leg_, zig_shift_, zig_legs_, (int)hs_segs_.size());
+            // [rect-z] 估算整条路径最短耗时, 据此校验 run_seconds 全局兜底是否够大(评审 A/B 收敛 MAJOR):
+            // 默认 60s 会砍断多段路径=演示半途急停。est 用命令转速/速度算, 是下界(水下转向更慢), 故按 1.3x 留余量告警。
+            double total_dist = 0.0;
+            for (size_t i = 0; i < hs_segs_.size(); ++i) total_dist += hs_segs_[i].distance;
+            double drive_t  = (h_speed_ > 0.0) ? (total_dist / h_speed_) : 0.0;
+            int    n_turns  = (int)hs_segs_.size() - 1; if (n_turns < 0) n_turns = 0;
+            double per_turn = ((hs_turn_omega_ > 0.0) ? (turn_deg_ * PI_M / 180.0 / hs_turn_omega_) : 0.0) + hs_turn_settle_s_;
+            double est_t    = drive_t + (double)n_turns * per_turn;
+            ROS_WARN("EST path time >= ~%.0fs (lower bound: drive %.0fs + %d turns x ~%.0fs; underwater turns slower).",
+                     est_t, drive_t, n_turns, per_turn);
+            if (h_run_seconds_ > 0.0 && h_run_seconds_ < est_t * 1.3)
+                ROS_ERROR("!!! run_seconds=%.1f < 1.3x est %.0fs: GLOBAL backstop will CUT path mid-way -> raise _run_seconds (or set <=0, then ONLY Ctrl+C stops). !!!",
+                          h_run_seconds_, est_t);
+            ROS_WARN("NOTE: per-segment stop by distance; TURN keeps pump OFF (no forward); run_seconds=%.1f is GLOBAL backstop -> set big enough to cover whole path; CUT POWER guards all.", h_run_seconds_);
+        }
         // 评审 LOW(Fable5)：两个自动停车兜底都被关→仅 Ctrl+C 可停(驱动无看门狗)，大字告警。
         if (h_run_seconds_ <= 0.0 && h_run_distance_ <= 0.0)
             ROS_WARN("!!! NO auto-stop (run_seconds<=0 and run_distance<=0): only Ctrl+C/SIGTERM stops, GUARD THE POWER !!!");
@@ -1580,6 +1654,7 @@ void MotionController::RunHeadingStraight()
                 return;
             }
             hs_yaw0_ = atan2(hs_sin_sum_, hs_cos_sum_);   // 圆均值参考航向
+            hs_base_yaw_ = hs_yaw0_;   // [rect-z] 起始航向基准(段0目标=基准本身; 单段模式无副作用)
             double n = (double)hs_still_n_;
             double denom = (n * hs_ls_tt_ - hs_ls_t_ * hs_ls_t_);
             double drift = (fabs(denom) > 1e-9) ? (n * hs_ls_ty_ - hs_ls_t_ * hs_ls_y_) / denom : 0.0; // rad/s
@@ -1594,6 +1669,7 @@ void MotionController::RunHeadingStraight()
             hs_I_ = 0.0; hs_d_filt_ = 0.0; hs_e_prev_ = 0.0;
             hs_t_prev_sample_ = now;
             hs_x0_ = wheel_pose_state.x; hs_y0_ = wheel_pose_state.y;
+            hs_seg_idx_ = 0;   // [rect-z] 段索引归零(段0即此处进入的直行; 单段模式忽略)
             openLogIfNeeded();
             ROS_WARN("[hs] -> DRIVE: speed=%.3f Kp=%.4f sign=%d (start straight)",
                      h_speed_, h_kp_, h_sign_);
@@ -1605,6 +1681,69 @@ void MotionController::RunHeadingStraight()
     if (hs_phase_ == HS_DONE)
     {
         heading_cmd_pub_.publish(cmd);
+        return;
+    }
+
+    // ---------- [rect-z] TURN：原地转向到下一段目标航向 ----------
+    // 闭环到 /imu_heading 真航向(融合, 不吃陀螺漂移); 复用直行同号约定(h_sign_)保证转对方向;
+    // 转向期 linear.x=0 + 泵关(linear.y=0) 绝不前进(安全); 超时/失速双看门狗失败一律停车不盲转。
+    if (hs_phase_ == HS_TURN)
+    {
+        // /imu_heading 陈旧 -> 立即停车中止(与 DRIVE 一致)
+        if (!hs_have_yaw_ || (now - hs_yaw_stamp_).toSec() > h_yaw_timeout_) {
+            ROS_ERROR_THROTTLE(1.0, "[hs] TURN: %s stale %.2fs -> STOP abort",
+                               h_yaw_topic_.c_str(), (now - hs_yaw_stamp_).toSec());
+            heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;
+        }
+        // 转完停稳子阶段: 持续发零, 稳够 settle 后进入下一段直行
+        if (hs_turn_settling_) {
+            heading_cmd_pub_.publish(cmd);   // 零
+            if ((now - hs_turn_settle_start_).toSec() >= hs_turn_settle_s_)
+                hsBeginSegment(hs_seg_idx_, now);
+            return;
+        }
+        double err = wrapPi(hs_yaw_rad_ - hs_turn_target_);   // 到目标航向误差(rad), 趋 0
+        // 超时: 转不到位 -> 停(失败朝安全方向, 绝不前冲)
+        if ((now - hs_turn_start_).toSec() > hs_turn_timeout_s_) {
+            ROS_ERROR("[hs] TURN seg%d timeout %.1fs (|err|=%.1fdeg) -> STOP",
+                      hs_seg_idx_, hs_turn_timeout_s_, fabs(err) * 180.0 / PI_M);
+            heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;
+        }
+        // 进度看门狗: 航向必须持续转动(转不起来=水下原地转失败 -> 停)
+        if (hs_new_sample_) {
+            hs_new_sample_ = false;
+            double moved = fabs(wrapPi(hs_yaw_rad_ - hs_turn_last_yaw_));
+            if (moved > hs_turn_progress_eps_) { hs_turn_last_yaw_ = hs_yaw_rad_; hs_turn_last_prog_t_ = now; }
+        }
+        if ((now - hs_turn_last_prog_t_).toSec() > hs_turn_stall_s_) {
+            ROS_ERROR("[hs] TURN seg%d STALLED (no yaw progress %.1fs, cannot rotate?) -> STOP",
+                      hs_seg_idx_, hs_turn_stall_s_);
+            heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;
+        }
+        // 到位: 进入停稳
+        if (fabs(err) <= hs_turn_tol_) {
+            hs_turn_settling_ = true; hs_turn_settle_start_ = now;
+            heading_cmd_pub_.publish(cmd);   // 零
+            ROS_WARN("[hs] TURN seg%d reached (err=%.1fdeg) -> settle %.1fs",
+                     hs_seg_idx_, err * 180.0 / PI_M, hs_turn_settle_s_);
+            return;
+        }
+        // 旋转命令: 同号约定保证转对方向; 近目标(fine_band 内)降速防过冲; 泵关、不前进。
+        double mag = (fabs(err) > hs_turn_fine_band_) ? hs_turn_omega_ : hs_turn_omega_fine_;
+        double az  = (double)h_sign_ * ((err > 0.0) ? 1.0 : -1.0) * mag;
+        cmd.linear.x  = 0.0;
+        cmd.linear.y  = 0.0;   // 泵关: 转向期绝不前进(安全; 与直行"仅前进时开泵"一致)
+        cmd.linear.z  = 0.0;
+        cmd.angular.z = az;
+        heading_cmd_pub_.publish(cmd);
+        if (hs_log_open_) {
+            double yaw_age_ms = (now - hs_yaw_stamp_).toSec() * 1000.0;
+            hs_log_ << std::fixed << std::setprecision(6)
+                    << now.toSec() << ",TURN," << hs_yaw_rad_ * 180.0 / PI_M << ',' << yaw_age_ms << ','
+                    << hs_turn_target_ * 180.0 / PI_M << ',' << err << ",0,0,0," << az << ",0,"
+                    << wheel_pose_state.x << ',' << wheel_pose_state.y << ',' << wheel_pose_state.theta << ",0\n";
+        }
+        ROS_INFO_THROTTLE(1.0, "[hs] TURN seg%d err=%.1fdeg az=%.3f", hs_seg_idx_, err * 180.0 / PI_M, az);
         return;
     }
 
@@ -1626,9 +1765,28 @@ void MotionController::RunHeadingStraight()
         ROS_WARN("[hs] reached time %.1fs -> stop done", drive_elapsed);
         heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;
     }
-    if (h_run_distance_ > 0.0 && driven >= h_run_distance_) {
-        ROS_WARN("[hs] reached dist %.2fm -> stop done", driven);
-        heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;
+    if (path_mode_ == PATH_SINGLE) {
+        if (h_run_distance_ > 0.0 && driven >= h_run_distance_) {
+            ROS_WARN("[hs] reached dist %.2fm -> stop done", driven);
+            heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;
+        }
+    } else {
+        // [rect-z] 段距离到 -> 原地转向到下一段; 末段走完 -> 收尾停车。run_seconds 仍是全局时间兜底(上面)。
+        if (hs_segs_.empty() || hs_seg_idx_ >= (int)hs_segs_.size()) {
+            heading_cmd_pub_.publish(cmd); hs_phase_ = HS_DONE; return;   // 兜底: 段表异常即停
+        }
+        if (driven >= hs_segs_[hs_seg_idx_].distance) {
+            ROS_WARN("[hs] seg%d/%d leg done (driven=%.2fm)", hs_seg_idx_, (int)hs_segs_.size(), driven);
+            heading_cmd_pub_.publish(cmd);   // 本拍发零, 下一拍进入转向/收尾
+            int next = hs_seg_idx_ + 1;
+            if (next >= (int)hs_segs_.size()) {
+                ROS_WARN("[hs] all %d segments done -> stop", (int)hs_segs_.size());
+                hs_phase_ = HS_DONE; return;
+            }
+            hs_seg_idx_ = next;
+            hsBeginTurn(wrapPi(hs_base_yaw_ + hs_segs_[next].cum_off), now);
+            return;
+        }
     }
 
     // 周期暂停（IMU ≤3min/≥3s 合规；**不重采 yaw0**，否则会抹掉要测的累计误差）
@@ -1645,7 +1803,8 @@ void MotionController::RunHeadingStraight()
             in_pause = true;
         }
     } else { // HS_DRIVE
-        if (h_pause_every_s_ > 0.0 && (now - hs_last_pause_).toSec() >= h_pause_every_s_) {
+        // [rect-z] 周期暂停只在单段模式; 矩形/Z 段短(数十秒内)无需暂停, 且避免与段计时/转向交互。
+        if (path_mode_ == PATH_SINGLE && h_pause_every_s_ > 0.0 && (now - hs_last_pause_).toSec() >= h_pause_every_s_) {
             hs_phase_ = HS_PAUSE; hs_phase_start_ = now; in_pause = true;
             ROS_WARN("[hs] periodic pause %.1fs (IMU compliance, no yaw0 re-capture)", h_pause_duration_s_);
         }
@@ -1715,6 +1874,64 @@ void MotionController::RunHeadingStraight()
 
     ROS_INFO_THROTTLE(1.0, "[hs] %s e=%.2fdeg u=%.3f I=%.3f driven=%.2fm t=%.1fs",
                       in_pause ? "PAUSE" : "DRIVE", e * 180.0 / PI_M, u, hs_I_, driven, drive_elapsed);
+}
+
+// [rect-z] 据 control_mode 生成段表: 每段 {直行距离, 相对起始航向的累计转角(rad)}。
+// 转角累计不在此 wrap; 用时 wrapPi(base + cum_off) 得该段目标航向。
+void MotionController::hsBuildSegments()
+{
+    hs_segs_.clear();
+    const double td = turn_deg_ * PI_M / 180.0;
+    if (path_mode_ == PATH_RECT) {
+        int laps = (rect_laps_ > 0) ? rect_laps_ : 1;
+        int n = 4 * laps;
+        double cum = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double dist = (i % 2 == 0) ? rect_side_a_ : rect_side_b_;   // 邻边交替 a,b,a,b
+            hs_segs_.push_back({dist, cum});
+            cum += (double)turn_dir_ * td;     // 本段走完后转 turn_deg(朝下一段)
+        }
+    } else if (path_mode_ == PATH_ZIGZAG) {
+        int legs = (zig_legs_ > 0) ? zig_legs_ : 1;
+        double cum = 0.0;
+        hs_segs_.push_back({zig_leg_, cum});                        // 第一条长边
+        for (int k = 1; k < legs; ++k) {
+            // U 形换行: 两个同向转角(中间夹一段横移); 换行方向逐条交替, 形成弓字形覆盖
+            double ud = (double)turn_dir_ * ((k % 2 == 1) ? 1.0 : -1.0) * td;
+            cum += ud; hs_segs_.push_back({zig_shift_, cum});       // 横移(转一个角后)
+            cum += ud; hs_segs_.push_back({zig_leg_,   cum});       // 下一条长边(再转一个角, 方向反转)
+        }
+    }
+    if (hs_segs_.empty()) hs_segs_.push_back({0.0, 0.0});   // 兜底: 空表退化为零距离段(立即收尾)
+}
+
+// [rect-z] 进入第 idx 段直行: 设该段目标航向为 hs_yaw0_, 复位 PD/距离锚/软启动, 转 DRIVE。
+void MotionController::hsBeginSegment(int idx, const ros::Time& now)
+{
+    if (idx < 0 || idx >= (int)hs_segs_.size()) { hs_phase_ = HS_DONE; return; }   // 防御: 越界即安全收尾(评审 A/B NIT)
+    hs_yaw0_ = wrapPi(hs_base_yaw_ + hs_segs_[idx].cum_off);   // 该段目标航向(供 DRIVE 的 PD 保持)
+    hs_x0_   = wheel_pose_state.x; hs_y0_ = wheel_pose_state.y;   // 距离锚归零
+    hs_ramp_start_ = now;                                         // 软启动重新渐起(已静止)
+    hs_I_ = 0.0; hs_d_filt_ = 0.0;
+    hs_e_prev_ = (double)h_sign_ * wrapPi(hs_yaw_rad_ - hs_yaw0_);
+    hs_t_prev_sample_ = hs_yaw_stamp_;
+    hs_phase_ = HS_DRIVE;
+    ROS_WARN("[hs] -> DRIVE seg%d/%d dist=%.2fm target=%.1fdeg",
+             idx, (int)hs_segs_.size(), hs_segs_[idx].distance, hs_yaw0_ * 180.0 / PI_M);
+}
+
+// [rect-z] 进入原地转向到 target_yaw(闭环到 /imu_heading)。
+void MotionController::hsBeginTurn(double target_yaw, const ros::Time& now)
+{
+    hs_turn_target_      = target_yaw;
+    hs_turn_start_       = now;
+    hs_turn_settling_    = false;
+    hs_turn_last_yaw_    = hs_yaw_rad_;
+    hs_turn_last_prog_t_ = now;
+    hs_phase_ = HS_TURN;
+    double dyaw = wrapPi(target_yaw - hs_yaw_rad_) * 180.0 / PI_M;
+    ROS_WARN("[hs] -> TURN to seg%d target=%.1fdeg (need ~%.0fdeg, omega=%.2f, pump OFF)",
+             hs_seg_idx_, target_yaw * 180.0 / PI_M, dyaw, hs_turn_omega_);
 }
 
 int main(int argc, char **argv)

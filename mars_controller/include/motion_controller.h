@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <vector>
 #include <iostream>
 #include <fstream>
 #include <csignal>
@@ -135,6 +136,15 @@ enum HsPhase : uint8_t
     HS_DRIVE    = 2,  // 行驶 + PD 航向保持
     HS_PAUSE    = 3,  // 周期暂停（IMU 合规 ≤3min/≥3s，不重采 yaw0）
     HS_DONE     = 4,  // 结束：持续发零
+    HS_TURN     = 5,  // [rect-z] 原地转向到下一段目标航向（闭环 /imu_heading 真航向、泵关、不前进）
+};
+
+// [rect-z] 路径模式：单段(原直行) / 矩形 / Z(弓字形)。仅在 heading 模式下生效。
+enum PathMode : uint8_t
+{
+    PATH_SINGLE = 0,  // 原单段定航向直行（行为与原 heading_straight 逐字一致）
+    PATH_RECT   = 1,  // 矩形：N 边 + 边间定角转向
+    PATH_ZIGZAG = 2,  // Z/弓字形：长边 + U 形换行（两次转向 + 横移）
 };
 
 class MotionController
@@ -203,6 +213,11 @@ private:
     void imuHeadingCallback(const std_msgs::Float32::ConstPtr& msg);
     void openLogIfNeeded();
     static double wrapPi(double a);   // 角度 wrap 到 [-pi, pi]
+
+    // [rect-z] 矩形/Z 段序列扩展（复用 heading PD；仅 path_mode_!=PATH_SINGLE 生效，对原直行零影响）
+    void hsBuildSegments();                                     // 据 control_mode 生成段表(距离 + 相对起始航向的累计转角)
+    void hsBeginSegment(int idx, const ros::Time& now);         // 进入第 idx 段直行(设该段目标航向、复位 PD/距离锚/软启动)
+    void hsBeginTurn(double target_yaw, const ros::Time& now);  // 进入原地转向到 target_yaw
 
 
 private:
@@ -355,5 +370,29 @@ private:
     ros::Time hs_drive_start_, hs_last_pause_, hs_ramp_start_;  // hs_ramp_start_: 缓启动斜坡起点
     std::ofstream hs_log_;
     bool      hs_log_open_ = false;
+
+    // —— [rect-z] 矩形/Z 段序列运行态（path_mode_!=PATH_SINGLE 时用）——
+    PathMode  path_mode_ = PATH_SINGLE;
+    struct HsSeg { double distance; double cum_off; };   // distance: 该段直行米数; cum_off: 相对起始航向的累计转角(rad)
+    std::vector<HsSeg> hs_segs_;
+    int       hs_seg_idx_  = 0;
+    double    hs_base_yaw_ = 0.0;        // STILL 采到的起始航向(所有段目标航向的基准)
+    // 段序列 / 转向参数（私有句柄读, 启动前设, 构造期只读一次）
+    double rect_side_a_ = 2.0, rect_side_b_ = 2.0;   // 矩形两邻边(默认正方形)
+    int    rect_laps_   = 1;                          // 绕几圈
+    double zig_leg_ = 3.0, zig_shift_ = 0.5;          // Z: 长边长 / 换行横移
+    int    zig_legs_ = 4;                             // Z: 长边条数
+    int    turn_dir_ = 1;                             // 转向方向 +1/-1 (执行期闭环到目标, 此仅定目标航向偏置正负)
+    double turn_deg_ = 90.0;                          // 每次转角(度)
+    double hs_turn_omega_ = 0.2, hs_turn_omega_fine_ = 0.08;  // 转速 / 近目标慢转速(rad/s, 钳[0,0.3])
+    double hs_turn_tol_ = 0.0, hs_turn_fine_band_ = 0.0;      // 完成判据 / 慢转带(rad, 由度换算)
+    double hs_turn_settle_s_   = 1.0;                 // 转完停稳时长
+    double hs_turn_timeout_s_  = 25.0;                // 单次转向超时(失败->停, 安全方向)
+    double hs_turn_stall_s_ = 3.0, hs_turn_progress_eps_ = 0.0; // 失速窗 / 进度阈(rad): 转不起来即停
+    // 转向运行态
+    double    hs_turn_target_ = 0.0;
+    ros::Time hs_turn_start_, hs_turn_settle_start_, hs_turn_last_prog_t_;
+    double    hs_turn_last_yaw_ = 0.0;
+    bool      hs_turn_settling_ = false;
 };
 #endif
