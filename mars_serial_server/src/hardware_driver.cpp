@@ -144,11 +144,10 @@ void HardwareDriver::rosNode()
     nh_.param("max_alpha", motion_params.max_alpha, 1.0);
 
     // ========== [vcu] 简化版 VCU 差速补偿 + /cmd_vel 看门狗 参数 ==========
-    // 默认值刻意=保持现行为：omega_gain=6.4 / track_bias=0 / motor_scale=230
-    //   -> 与旧码逐位等价（cmd_vel->*6.4->*230、不补偿），0613 直线测试锚定参数不受影响。
+    // 默认: omega_gain=6.4 / motor_scale=230（沿旧码）; track_bias=0.1（现场实测默认, 治"总向左偏": 右减左增）。
     // 改这些参数走 launch / rosparam，现场不需重编。
     nh_.param("omega_gain",      omega_gain_,      6.4);
-    nh_.param("track_bias",      track_bias_,      0.0);
+    nh_.param("track_bias",      track_bias_,      0.1);   // 现场实测默认; 下方夹到 +-0.15
     nh_.param("motor_scale",     motor_scale_,     230.0);
     nh_.param("max_track_speed", max_track_speed_, 1.0);
     nh_.param("max_motor_cmd",   max_motor_cmd_,   300);
@@ -160,8 +159,8 @@ void HardwareDriver::rosNode()
     if (max_motor_cmd_   <= 0)   max_motor_cmd_   = 300;
     if (cmd_vel_timeout_ <= 0.0) cmd_vel_timeout_ = 0.5;
     cmd_vel_received_ = false;
-    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v1-20260613）
-    ROS_WARN("[vcu] hardware_driver VCU-v1-20260613 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
+    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v2-20260621，track_bias 默认 0.1）
+    ROS_WARN("[vcu] hardware_driver VCU-v2-20260621 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
              omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_);
 
     keyboardVel_cmd_sub_ = nh_.subscribe("cmd_vel", 100, &HardwareDriver::sendKeyboardVelCommand, this);
@@ -1877,8 +1876,10 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     double right_speed = v + w * half_track;
     double left_speed  = v - w * half_track;
 
-    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0 -> 不补偿）
+    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0.1 -> 右减左增治左偏）
     //    track_bias>0：右减左增（治“总向左偏”）；<0 反之。
+    //    注意：对所有 /cmd_vel 生效（含 rect/zig 原地转向→左右约 22% 不对称、转向期略偏心；
+    //          闭环到航向仍能转到位，仅轻微位移。若要纯原地转可改为仅 v!=0 时补偿。）
     right_speed *= (1.0 - track_bias_);
     left_speed  *= (1.0 + track_bias_);
 

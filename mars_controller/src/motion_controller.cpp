@@ -4,7 +4,7 @@
 #include <csignal>      // [heading-straight-pd] signal/SIG_IGN/SIGINT/SIGTERM；SIGHUP/SIGPIPE 由 Linux <signal.h> 提供
 
 // [heading-straight-pd] 版本闸门：改功能必升版本，操作单 grep 自判
-#define CODE_VERSION "heading-straight-pd-v6-rect-z-20260620"
+#define CODE_VERSION "heading-straight-pd-v7-defaults-20260621"
 
 // [heading-straight-pd] 自管 SIGINT/SIGTERM/SIGHUP：退出前补发零速，防驱动保持最后指令（驱动无看门狗，D-29）
 static volatile sig_atomic_t g_hs_stop = 0;
@@ -181,11 +181,11 @@ void MotionController::rosNode()
     else if (control_mode == std::string("zigzag"))    path_mode_ = PATH_ZIGZAG;
     else                                               path_mode_ = PATH_SINGLE;
 
-    pnh_.param<double>("heading_kp",        h_kp_,               0.15);
-    pnh_.param<double>("heading_kd",        h_kd_,               0.0);
+    pnh_.param<double>("heading_kp",        h_kp_,               1.0);   // 现场实测默认: PD 比例
+    pnh_.param<double>("heading_kd",        h_kd_,               1.0);   // 现场实测默认: PD 微分(输出仍受 omega_limit 钳)
     pnh_.param<double>("heading_ki",        h_ki_,               0.0);
     pnh_.param<double>("i_clamp",           h_i_clamp_,          0.05);
-    pnh_.param<double>("straight_speed",    h_speed_,            0.1);
+    pnh_.param<double>("straight_speed",    h_speed_,            0.25);  // 现场实测默认: 履带打滑临界以内
     pnh_.param<double>("omega_limit",       h_omega_limit_,      0.1);
     pnh_.param<double>("pump_speed",        h_pump_speed_,       0.0);   // 泵占空比 0~1; 默认0(陆地安全); 下水正式跑 _pump_speed:=0.2
     pnh_.param<double>("settle_seconds",    h_settle_s_,         20.0);
