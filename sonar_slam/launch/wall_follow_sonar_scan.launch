@@ -23,7 +23,9 @@
   <arg name="range_level"       default="s0"/>            <!-- 声呐量程档 s0=4m -->
   <arg name="num_positions"     default="6"/>             <!-- 采集停点数(3-50) -->
   <arg name="move_distance"     default="2.0"/>           <!-- 每段沿边前进距离(米); 拐弯停不计入 -->
-  <arg name="required_circles"  default="1"/>             <!-- 每点扫描圈数 -->
+  <arg name="scan_duration"     default="100.0"/>         <!-- ★每点扫描硬超时(秒): 到点即强制存盘并前进、不管扫没扫满! 必须 >= 声呐实测扫满一圈耗时, 调小会存出不完整坏档。默认 100=代码原值(保行为不变、偏保守); 操作说明权威值=95.0; 现场看日志"完成第N圈扫描!耗时X秒"实测后取其 1.5~2 倍 -->
+  <arg name="wait_duration"     default="60.0"/>          <!-- 换点移动看门狗(秒): move_straight timeout=max(本值, move_distance*15)。默认 60=代码原值; 操作说明权威值=50.0 -->
+  <!-- 注: required_circles 故意不暴露 —— 多位置流程在 multi_position_sonar_mapper.cpp:2986 被硬写=1, 调了不生效(暴露会误导), 每点恒扫 1 圈 -->
 
   <!-- acquire_wall_first 默认 false(保守): 须人工把机器人对齐到墙边(墙在右)再启动 -> mapper 直接进扫-走循环。
        置 true=丢角落自启(启动即旋转找墙+沿边 acquire_distance 米再扫); 仅在 step3 找墙现场验过、右超声映射标定后才用。 -->
@@ -59,7 +61,8 @@
     <param name="phase1/enabled"          value="true"/>
     <param name="phase1/num_positions"    value="$(arg num_positions)"/>
     <param name="phase1/move_distance"    value="$(arg move_distance)"/>
-    <param name="phase1/required_circles" value="$(arg required_circles)"/>
+    <param name="phase1/scan_duration"    value="$(arg scan_duration)"/>
+    <param name="phase1/wait_duration"    value="$(arg wait_duration)"/>
     <param name="phase1/acquire_wall_first" value="$(arg acquire_wall_first)"/>
     <param name="phase1/acquire_distance" value="$(arg acquire_distance)"/>
   </node>
