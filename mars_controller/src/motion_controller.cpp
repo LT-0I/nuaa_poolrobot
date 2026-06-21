@@ -2,9 +2,12 @@
 #include <cmath>
 #include <iomanip>
 #include <csignal>      // [heading-straight-pd] signal/SIG_IGN/SIGINT/SIGTERM；SIGHUP/SIGPIPE 由 Linux <signal.h> 提供
+#include <cstdlib>      // getenv (日志落机载主目录 $HOME)
+#include <ctime>        // time/localtime/strftime (日志文件名带运行时间)
+#include <sys/stat.h>   // mkdir/stat (创建日志目录)
 
 // [heading-straight-pd] 版本闸门：改功能必升版本，操作单 grep 自判
-#define CODE_VERSION "heading-straight-pd-v7-defaults-20260621"
+#define CODE_VERSION "heading-straight-pd-v8-homelog-20260621"
 
 // [heading-straight-pd] 自管 SIGINT/SIGTERM/SIGHUP：退出前补发零速，防驱动保持最后指令（驱动无看门狗，D-29）
 static volatile sig_atomic_t g_hs_stop = 0;
@@ -266,11 +269,26 @@ void MotionController::rosNode()
 
     if (heading_mode_)
     {
-        // CSV 默认路径加墙钟时间戳，避免连续两次运行覆盖同一文件（评审 LOW：防数据丢失）。
+        // CSV 默认落机载主目录 $HOME/sonar_logs/straightline_logs/，文件名带运行时间+关键参数(Kp/Kd/速度)，
+        // 便于复盘对应整定且防连续运行覆盖。显式 _log_path:=<file> 时尊重用户路径、不改写。
         if (h_log_path_ == "/tmp/heading_straight_log.csv") {
-            char buf[80];
-            snprintf(buf, sizeof(buf), "/tmp/heading_straight_log_%u.csv", (unsigned)ros::WallTime::now().sec);
-            h_log_path_ = buf;
+            const char* home = getenv("HOME");
+            std::string base = std::string(home ? home : "/tmp") + "/sonar_logs/";
+            std::string dir  = base + "straightline_logs/";
+            struct stat st;
+            if (stat(base.c_str(), &st) != 0) mkdir(base.c_str(), 0755);
+            if (stat(dir.c_str(),  &st) != 0) mkdir(dir.c_str(),  0755);
+            char tbuf[32] = {0};
+            std::time_t tt = std::time(nullptr);
+            std::tm* lt = std::localtime(&tt);   // 评审A: localtime 可能返回 NULL, 不可直接喂 strftime
+            if (lt) std::strftime(tbuf, sizeof(tbuf), "%Y%m%d_%H%M%S", lt);
+            else    snprintf(tbuf, sizeof(tbuf), "%u", (unsigned)tt);
+            const char* mode_str = (path_mode_ == PATH_SINGLE ? "single" :
+                                    (path_mode_ == PATH_RECT  ? "rect" : "zigzag"));
+            char fbuf[256];
+            snprintf(fbuf, sizeof(fbuf), "%sheading_%s_%s_kp%.2f_kd%.2f_spd%.2f.csv",
+                     dir.c_str(), mode_str, tbuf, h_kp_, h_kd_, h_speed_);
+            h_log_path_ = fbuf;
         }
         imu_heading_sub_ = nh_.subscribe(h_yaw_topic_, 50, &MotionController::imuHeadingCallback, this);
         heading_cmd_pub_ = nh_.advertise<geometry_msgs::Twist>(h_cmd_topic_, 10);
