@@ -132,6 +132,7 @@ MoveController::MoveController() :
     // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 (全局 nh_.param, 构造期读一次) =====
     nh_.param("enable_corner",          config_enable_corner_,          true);
     nh_.param("corner_front_trigger_m", config_corner_front_trigger_m_, 1.5f);
+    nh_.param("corner_use_wall_dist",   config_corner_use_wall_dist_,   true);   // 前墙触发距离是否跟随 wall_align(默认开: 走够离墙距即停转)
     nh_.param("corner_front_confirm",   config_corner_front_confirm_,   3);
     nh_.param("corner_settle_sec",      config_corner_settle_sec_,      1.0f);
     nh_.param("corner_turn_deg",        config_corner_turn_deg_,        90.0f);
@@ -172,7 +173,7 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-corner-fused-findwall-20260618 (IMU-heading inner + ultra-wall outer + fused-heading stop-turn corner + drop-in find-wall bootstrap)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-corner-walldist-log-20260621 (corner trigger follows wall_align; per-run log to $HOME/sonar_logs/move_logs with wall params in filename)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -345,6 +346,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     bool success = false;
     bool wall_avoiding = false;
     int front_wall_detect_count = 0;
+    bool corner_armed = true;             // 拐角触发武装位: 触发即下锁, 须前方重新净空才再武装(防欠转后老前墙仍在视野立即重触发->累计U转)
     bool pump_closed_early = false;
     
     // 角度累积变量
@@ -418,7 +420,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
 
         // ==================== 前墙拐角: 停-转-融合航向闭环 (P2) ====================
         // enable_corner=false → 整块跳过, 走纯串级直行(直行段单独整定 / 回归基线)。
-        // 触发: 前超声 data0(前左)/data1(前右) min ∈ (0.3, corner_front_trigger_m) 连续 confirm 帧。
+        // 触发: 前超声 data0(前左)/data1(前右) min < corner_trig(默认跟随 wall_align: 走够离墙距即停转; 否则独立 corner_front_trigger_m) 连续 confirm 帧。
         // 看门狗铁律: 所有相位 ≤0.05s 持续 publish, 无盲 sleep; 泵全程 linear.y=pump_speed(看门狗只停电机不停泵)。
         if (config_enable_corner_ && !wall_avoiding && move_direction == 'w') {
             // 前墙读取持 sensor_mutex_ 快照(与 ultraCallback 写侧锁规则一致)
@@ -431,11 +433,15 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             float front_dist = std::min(front_left_dist, front_right_dist);
             // 地板取有效量程下限 0.05(而非 0.3): 近场 [0.05,0.3) 也判有墙, 防机器人已逼到 <0.3m 时落进盲带漏触发撞墙
             // (无效/无回波在 ultraCallback 已兜成 999 > trigger, 自然排除)。评审 PARTIAL 安全项。
-            bool has_front_wall = (front_dist > 0.05f && front_dist < config_corner_front_trigger_m_);
+            // 前墙触发距离: corner_use_wall_dist=true 时跟随 wall_align(走够离墙距即停转, 用户指定逻辑); 否则用独立 corner_front_trigger_m
+            float corner_trig = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
+            bool has_front_wall = (front_dist > 0.05f && front_dist < corner_trig);
 
             if (!has_front_wall) {
                 front_wall_detect_count = 0;
-            } else if (++front_wall_detect_count >= config_corner_front_confirm_) {
+                corner_armed = true;   // 前方净空 -> 重新武装
+            } else if (corner_armed && ++front_wall_detect_count >= config_corner_front_confirm_) {
+                corner_armed = false;  // 触发即下锁; 须前方重新净空才再武装(评审D MAJOR: 防转向欠转后老前墙仍<trig时立即重触发->累计U转)
                 ROS_WARN("[corner] front wall %.2fm (confirm %d) -> STOP-and-turn", front_dist, front_wall_detect_count);
                 wall_avoiding = true;
 
@@ -582,6 +588,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 ramp_start_time = ros::Time::now();   // 速度 + 外环 C 双软启动重置
                 front_wall_detect_count = 0;
                 wall_avoiding = false;
+                // corner_armed 此处刻意不复位: 转向欠转时老前墙仍<trig, 须靠上方 !has_front_wall 数据驱动重新武装(勿在此加 =true 否则重开欠转 U 转洞)
 
                 // 恢复前进速度
                 {
@@ -1249,8 +1256,12 @@ void MoveController::initWalkLog(const std::string& log_type, float target_dista
     char time_buf[64];
     strftime(time_buf, sizeof(time_buf), "%Y%m%d_%H%M%S", tm_info);
     
-    current_log_filename_ = dir + log_type + "_" + std::string(time_buf) + 
-                            "_dist" + std::to_string(target_distance) + ".csv";
+    // 文件名带运行时间+关键整定参数(wall_align/k_dist/k_par), 便于复盘对应整定 (用户要求"按运行时间+参数")
+    current_log_filename_ = dir + log_type + "_" + std::string(time_buf) +
+                            "_dist" + std::to_string(target_distance) +
+                            "_wa" + std::to_string(config_wall_align_) +
+                            "_kd" + std::to_string(config_wall_k_dist_) +
+                            "_kp" + std::to_string(config_wall_k_par_) + ".csv";
     
     if (walk_log_file_.is_open()) {
         walk_log_file_.close();

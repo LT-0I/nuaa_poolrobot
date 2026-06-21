@@ -266,7 +266,7 @@ private:
     // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 =====
     // 全局 nh_.param, 构造期读一次(终端2 裸 rosrun 无 launch → 默认即操作值, 仅【启动前】rosparam set 生效)。
     bool   config_enable_corner_         = true;   // false=跳过前墙拐角块走纯串级直行(直行段单独整定 + 作回归基线)
-    float  config_corner_front_trigger_m_= 1.5f;   // 前超声(data0前左/data1前右)min<此且>0.05m 触发拐角; 保 1.5 给停车物理裕度
+    float  config_corner_front_trigger_m_= 1.5f;   // 仅 corner_use_wall_dist=false 时生效的固定前墙触发距离; 默认(true)触发跟随 wall_align
     int    config_corner_front_confirm_  = 3;      // 连续确认帧(>0.05m 近场地板拒噪, 上限内全有效)
     float  config_corner_settle_sec_     = 1.0f;   // 停稳取入航向时长(持续 20Hz 发零运动+泵, 喂看门狗)
     float  config_corner_turn_deg_       = 90.0f;  // 闭环左转目标(融合航向转过幅值)
@@ -275,6 +275,7 @@ private:
     float  config_corner_slow_deg_       = 15.0f;  // 距目标此角内降到 fine
     float  config_corner_turn_timeout_   = 8.0f;   // 转向硬超时(s)
     float  config_corner_turn_cap_deg_   = 130.0f; // odom 角兜底上限(默认 turn+40°宽裕度): 仅兜 IMU 大故障/防过转, 不与 IMU 到位判据争紧裕度(评审 HIGH)
+    bool   config_corner_use_wall_dist_  = true;   // true=前墙触发距离跟随 wall_align(走够离墙距即停转拐弯, 用户指定); false=用独立 corner_front_trigger_m
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 构造期读一次; 启动前 rosparam set /xxx) =====
     float config_findwall_omega_       = 0.18f;  // 找墙原地偏航角速度(cmd; ×6.4≈rad/s)。默认0.18(>拐角fine0.10的水下起转阈、≈coarse0.2);
