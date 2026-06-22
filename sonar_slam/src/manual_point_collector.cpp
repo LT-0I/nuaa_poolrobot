@@ -759,8 +759,8 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
             aborted = true;
             break;
         }
-//        ROS_INFO_THROTTLE(5.0, "sweeping... angle=%u/400 (%.0fs elapsed)",
-//                          angle, (ros::Time::now() - scan_start).toSec());
+        ROS_INFO_THROTTLE(5.0, "sweeping... angle=%u/400 (%.0fs elapsed)",
+                          angle, (ros::Time::now() - scan_start).toSec());
         // 1. 先清本角接收标志(必须在发命令前: 否则极快回包会被这次清零吞掉->空等)
         {
             std::lock_guard<std::mutex> lk(frame_mutex_);
