@@ -9,7 +9,7 @@
 // [heading-straight-pd] 版本闸门：改功能必升版本，操作单 grep 自判
 #define CODE_VERSION "heading-straight-pd-v8-homelog-20260621"
 
-// [heading-straight-pd] 自管 SIGINT/SIGTERM/SIGHUP：退出前补发零速，防驱动保持最后指令（驱动无看门狗，D-29）
+// [heading-straight-pd] 自管 SIGINT/SIGTERM/SIGHUP：退出前补发零速，防驱动保持最后指令（驱动现有 0.5s /cmd_vel 看门狗停电机+泵兜底，但退出即时补零更快，仍补；最终保命靠断电，旧"无看门狗D-29"已过时）
 static volatile sig_atomic_t g_hs_stop = 0;
 static void hsSigintHandler(int) { g_hs_stop = 1; }
 
@@ -336,7 +336,7 @@ void MotionController::rosNode()
                           h_run_seconds_, est_t);
             ROS_WARN("NOTE: per-segment stop by distance; TURN keeps pump OFF (no forward); run_seconds=%.1f is GLOBAL backstop -> set big enough to cover whole path; CUT POWER guards all.", h_run_seconds_);
         }
-        // 评审 LOW(Fable5)：两个自动停车兜底都被关→仅 Ctrl+C 可停(驱动无看门狗)，大字告警。
+        // 评审 LOW(Fable5)：两个自动停车兜底都被关→主要靠 Ctrl+C 停(驱动另有 0.5s /cmd_vel 看门狗停电机+泵兜底)，大字告警。
         if (h_run_seconds_ <= 0.0 && h_run_distance_ <= 0.0)
             ROS_WARN("!!! NO auto-stop (run_seconds<=0 and run_distance<=0): only Ctrl+C/SIGTERM stops, GUARD THE POWER !!!");
         ROS_WARN("======================================================================");
@@ -1581,7 +1581,7 @@ void MotionController::openLogIfNeeded()
     }
 }
 
-// 退出前补发零速（main 在 Ctrl+C 后调用；驱动无看门狗，否则保持最后指令）
+// 退出前补发零速（main 在 Ctrl+C 后调用；驱动现有 0.5s /cmd_vel 看门狗停电机+泵兜底，但退出即时补零更快、仍补；最终保命靠断电）
 void MotionController::shutdownStop()
 {
     if (!heading_mode_) return;
@@ -1956,7 +1956,7 @@ int main(int argc, char **argv)
 {
     // [heading-straight-pd] NoSigintHandler + 自管 SIGINT/SIGTERM/SIGHUP：退出前能补发零速。
     // 评审 HIGH(Fable5·失控级)：仅接管 SIGINT 不够——pkill/kill 默认发 SIGTERM、池边 SSH/WiFi 掉线发 SIGHUP，
-    // 这两路若不接管会直接杀进程、一条零速不发，叠加驱动无 /cmd_vel 看门狗(D-29)=机器人按末指令续跑直至断电。
+    // 这两路若不接管会直接杀进程、一条零速不发；驱动现有 0.5s /cmd_vel 看门狗(停电机+泵)会兜底，但接管补零更即时、仍以断电为最终保命(旧"无看门狗D-29"已过时)。
     // handler 只置 volatile sig_atomic_t，异步信号安全；三信号共用同一退出路径(while→shutdownStop)。
     ros::init(argc, argv, "motion_controller_node", ros::init_options::NoSigintHandler);
     signal(SIGINT,  hsSigintHandler);
