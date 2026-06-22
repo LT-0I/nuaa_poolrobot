@@ -388,7 +388,7 @@ void MultiPositionSonarMapper::parseDataPacket(const char* buffer, unsigned int 
             case STATE_IDLE:
                 if (current_byte == 0x42) { // 'B'
                     parse_state_ = STATE_GOT_START1;
-                    ROS_DEBUG("找到第一个帧头 0x42");
+                    // ROS_DEBUG("找到第一个帧头 0x42");
                 }
                 rx_used_index_++;
                 break;
@@ -396,10 +396,10 @@ void MultiPositionSonarMapper::parseDataPacket(const char* buffer, unsigned int 
             case STATE_GOT_START1:
                 if (current_byte == 0x52) { // 'R'
                     parse_state_ = STATE_READING_LENGTH_LOW;
-                    ROS_DEBUG("找到第二个帧头 0x52");
+                    // ROS_DEBUG("找到第二个帧头 0x52");
                 } else {
                     // 不是预期的第二个头，重新同步
-                    ROS_DEBUG("无效的第二个帧头: 0x%02X, 期望 0x52", current_byte);
+                    // ROS_DEBUG("无效的第二个帧头: 0x%02X, 期望 0x52", current_byte);
                     parse_state_ = STATE_IDLE;
                 }
                 rx_used_index_++;
@@ -471,7 +471,7 @@ void MultiPositionSonarMapper::parseDataPacket(const char* buffer, unsigned int 
                     current_message_.clear();
                     
                     // 可以立即开始搜索下一个包
-                    ROS_DEBUG("包处理完成，准备接收下一个");
+                    // ROS_DEBUG("包处理完成，准备接收下一个");
                 }
                 rx_used_index_++;
                 break;
@@ -489,7 +489,7 @@ void MultiPositionSonarMapper::parseDataPacket(const char* buffer, unsigned int 
                 memmove(rx_buffer_, rx_buffer_ + i, remaining);
                 rx_end_index_ = remaining;
                 rx_used_index_ = 0;
-                ROS_DEBUG("在缓冲区中找到新帧头，重新开始解析");
+                // ROS_DEBUG("在缓冲区中找到新帧头，重新开始解析");
                 break;
             }
         }
@@ -512,58 +512,58 @@ void MultiPositionSonarMapper::processCompleteMessage() {
     total_scans_++;
     
     // ====== 调试日志：确认进入此函数 ======
-    ROS_INFO_ONCE("[DEBUG] 首次进入 processCompleteMessage 函数。");
-    ROS_DEBUG_THROTTLE(1.0, "处理消息: cmd=0x%04X, len=%u", current_message_.command, current_message_.length);
-    ROS_INFO("========== 收到完整消息 ==========");
-    ROS_INFO("命令字: 0x%04X (%d)", current_message_.command, current_message_.command);
-    ROS_INFO("消息长度: %u", current_message_.length);
-    ROS_INFO("源地址: %u", current_message_.source);
-    ROS_INFO("目的地址: %u", current_message_.destination);
-    ROS_INFO("数据大小: %lu", current_message_.data.size());
-    
+    // ROS_INFO_ONCE("[DEBUG] 首次进入 processCompleteMessage 函数。");
+    // ROS_DEBUG_THROTTLE(1.0, "处理消息: cmd=0x%04X, len=%u", current_message_.command, current_message_.length);
+    // ROS_INFO("========== 收到完整消息 ==========");
+    // ROS_INFO("命令字: 0x%04X (%d)", current_message_.command, current_message_.command);
+    // ROS_INFO("消息长度: %u", current_message_.length);
+    // ROS_INFO("源地址: %u", current_message_.source);
+    // ROS_INFO("目的地址: %u", current_message_.destination);
+    // ROS_INFO("数据大小: %lu", current_message_.data.size());
+
     // 打印前16字节原始数据（如果有）
-    if (!current_message_.data.empty()) {
-        std::stringstream hex_ss;
-        hex_ss << "数据前16字节 (十六进制): ";
-        for (size_t i = 0; i < std::min(current_message_.data.size(), size_t(16)); i++) {
-            hex_ss << std::hex << std::setw(2) << std::setfill('0') 
-                   << (int)current_message_.data[i] << " ";
-        }
-        ROS_INFO("%s", hex_ss.str().c_str());
-        
-        std::stringstream dec_ss;
-        dec_ss << "数据前16字节 (十进制): ";
-        for (size_t i = 0; i < std::min(current_message_.data.size(), size_t(16)); i++) {
-            dec_ss << std::dec << std::setw(3) << (int)current_message_.data[i] << " ";
-        }
-        ROS_INFO("%s", dec_ss.str().c_str());
-    }
-    ROS_INFO("==================================");
+    // if (!current_message_.data.empty()) {
+    //     std::stringstream hex_ss;
+    //     hex_ss << "数据前16字节 (十六进制): ";
+    //     for (size_t i = 0; i < std::min(current_message_.data.size(), size_t(16)); i++) {
+    //         hex_ss << std::hex << std::setw(2) << std::setfill('0')
+    //                << (int)current_message_.data[i] << " ";
+    //     }
+    //     ROS_INFO("%s", hex_ss.str().c_str());
+    //
+    //     std::stringstream dec_ss;
+    //     dec_ss << "数据前16字节 (十进制): ";
+    //     for (size_t i = 0; i < std::min(current_message_.data.size(), size_t(16)); i++) {
+    //         dec_ss << std::dec << std::setw(3) << (int)current_message_.data[i] << " ";
+    //     }
+    //     ROS_INFO("%s", dec_ss.str().c_str());
+    // }
+    // ROS_INFO("==================================");
     // ==========过滤控制命令回显 ==========
     // 检查数据是否以 'B','R' 开头（可能是命令回显）
     if (current_message_.data.size() >= 2 && 
         current_message_.data[0] == 0x42 && 
         current_message_.data[1] == 0x52) {
-        ROS_DEBUG("检测到可能的命令回显，跳过处理");
+        // ROS_DEBUG("检测到可能的命令回显，跳过处理");
         return;
     }
     
     // 根据命令字处理消息
     switch (current_message_.command) {
         case 2300: // 声纳数据消息
-             ROS_INFO_THROTTLE(0.5, "[DEBUG] 处理CMD 2300消息，数据大小: %lu", current_message_.data.size());
+            //  ROS_INFO_THROTTLE(0.5, "[DEBUG] 处理CMD 2300消息，数据大小: %lu", current_message_.data.size());
             if (parseCmd2300Message(current_message_.data)) {
                 valid_scans_++;
-                 ROS_DEBUG_THROTTLE(0.5, "成功解析2300消息 (#%u)", valid_scans_);
+                //  ROS_DEBUG_THROTTLE(0.5, "成功解析2300消息 (#%u)", valid_scans_);
             } else {
                 // ========== 解析失败时的错误恢复 ==========
-                ROS_DEBUG("解析2300消息失败，可能是错误的数据包");
+                // ROS_DEBUG("解析2300消息失败，可能是错误的数据包");
                 // 不需要特殊处理，状态机已经重置
             }
             break;
             
         default:
-            ROS_DEBUG("收到未知命令: 0x%04X", current_message_.command);
+            // ROS_DEBUG("收到未知命令: 0x%04X", current_message_.command);
             break;
     }
     // 根据命令字处理消息
@@ -588,11 +588,11 @@ bool MultiPositionSonarMapper::parseCmd2300Message(const std::vector<uint8_t>& d
     // ROS_WARN("  number_of_samples: %u", msg_data.number_of_samples);
     // ROS_WARN("  data_length: %u", msg_data.data_length);
     // ROS_WARN("  sample_period: %u", msg_data.sample_period);
-    ROS_WARN("===== 结构体字段与原始数据对应关系 =====");
-    ROS_WARN("sizeof(MsgCmd2300): %lu", sizeof(MsgCmd2300));
-    
+    // ROS_WARN("===== 结构体字段与原始数据对应关系 =====");
+    // ROS_WARN("sizeof(MsgCmd2300): %lu", sizeof(MsgCmd2300));
+
     // 逐字节打印前20个字节的原始值
-    ROS_WARN("原始数据索引及值:");
+    // ROS_WARN("原始数据索引及值:");
     // for (int i = 0; i < 20 && i < data.size(); i++) {
     //     ROS_WARN("  [%d]: 0x%02X (%u)", i, data[i], data[i]);
     // }
@@ -628,24 +628,24 @@ bool MultiPositionSonarMapper::parseCmd2300Message(const std::vector<uint8_t>& d
         if (msg_data.angle < min_angle) min_angle = msg_data.angle;
         if (msg_data.angle > max_angle) max_angle = msg_data.angle;
         
-        if (msg_count % 20 == 0) {
-            ROS_ERROR("原始角度[%d]: %d (当前范围: %d~%d)", 
-                    msg_count, msg_data.angle, min_angle, max_angle);
-        }
+        // if (msg_count % 20 == 0) {
+        //     ROS_ERROR("原始角度[%d]: %d (当前范围: %d~%d)",
+        //             msg_count, msg_data.angle, min_angle, max_angle);
+        // }
         msg_count++;
-        
-        if (msg_count == 200) {
-            ROS_ERROR("========== 原始角度统计 ==========");
-            ROS_ERROR("共收到 %d 条消息", msg_count);
-            ROS_ERROR("原始角度范围: %d ~ %d", min_angle, max_angle);
-            ROS_ERROR("理论范围应该是 0 ~ 399");
-            if (min_angle == 0 && max_angle == 399) {
-                ROS_ERROR("✓ 角度范围正常，覆盖完整360度");
-            } else {
-                ROS_ERROR("⚠ 角度范围异常，可能声纳配置有问题");
-            }
-            ROS_ERROR("=================================");
-        }
+
+        // if (msg_count == 200) {
+        //     ROS_ERROR("========== 原始角度统计 ==========");
+        //     ROS_ERROR("共收到 %d 条消息", msg_count);
+        //     ROS_ERROR("原始角度范围: %d ~ %d", min_angle, max_angle);
+        //     ROS_ERROR("理论范围应该是 0 ~ 399");
+        //     if (min_angle == 0 && max_angle == 399) {
+        //         ROS_ERROR("✓ 角度范围正常，覆盖完整360度");
+        //     } else {
+        //         ROS_ERROR("⚠ 角度范围异常，可能声纳配置有问题");
+        //     }
+        //     ROS_ERROR("=================================");
+        // }
     }
  
       // 角度验证
@@ -1228,11 +1228,11 @@ void MultiPositionSonarMapper::generateControlCommand(unsigned char* buffer, uns
     buffer[15] = (samples >> 8) & 0xFF;
     max_range_ = samples * 25e-6f * 1500.0f / 2.0f;
 
-    ROS_INFO("量程设置: 等级=%s, 采样点数=%u, 理论距离=%.1f米", 
-            range_level.c_str(), samples, max_range_);
+    // ROS_INFO("量程设置: 等级=%s, 采样点数=%u, 理论距离=%.1f米",
+    //         range_level.c_str(), samples, max_range_);
 
 
-    ROS_INFO("量程设置: 等级=%s, 采样点数=%u, 理论距离=%.1f米", range_level.c_str(), samples, max_range_);
+    // ROS_INFO("量程设置: 等级=%s, 采样点数=%u, 理论距离=%.1f米", range_level.c_str(), samples, max_range_);
 
  
             
@@ -1372,17 +1372,17 @@ void MultiPositionSonarMapper::convertToPointCloud() {
 
     static int call_count = 0;
     call_count++;
-    ROS_WARN("[坐标诊断] convertToPointCloud 第%d次被调用. rotation_angle_rad=%.4f (%.1f°)", 
-             call_count, rotation_angle_rad, rotation_angle_rad * RAD_TO_DEG);
+    // ROS_WARN("[坐标诊断] convertToPointCloud 第%d次被调用. rotation_angle_rad=%.4f (%.1f°)",
+    //          call_count, rotation_angle_rad, rotation_angle_rad * RAD_TO_DEG);
 
 
     // 添加调试输出
     static bool first_debug = true;
     if (first_debug && !sonar_points_.empty()) {
         float original_angle = sonar_points_[0].angle * RAD_TO_DEG;
-        ROS_WARN("角度处理: 原始角度=%.1f°, 应用旋转=%.1f°, 最终角度=%.1f°", 
-                original_angle, rotation_angle_deg, 
-                original_angle + rotation_angle_deg);
+        // ROS_WARN("角度处理: 原始角度=%.1f°, 应用旋转=%.1f°, 最终角度=%.1f°",
+        //         original_angle, rotation_angle_deg,
+        //         original_angle + rotation_angle_deg);
         first_debug = false;
     }
 
@@ -1426,8 +1426,8 @@ void MultiPositionSonarMapper::convertToPointCloud() {
                 else if (angle >= 135 || angle < -135) direction = "后";
                 else if (angle >= -135 && angle < -45) direction = "左";
                 
-                ROS_WARN("方向验证[%d]: 坐标(%.3f,%.3f), 角度=%.1f°, 方向=%s",
-                        dir_check_count, point.x, point.y, angle, direction);
+                // ROS_WARN("方向验证[%d]: 坐标(%.3f,%.3f), 角度=%.1f°, 方向=%s",
+                //         dir_check_count, point.x, point.y, angle, direction);
                 dir_check_count++;
             }
                         
@@ -1436,13 +1436,13 @@ void MultiPositionSonarMapper::convertToPointCloud() {
                 // 计算旋转后角度
                 float rotated_angle = atan2(point.y, point.x) * RAD_TO_DEG;
                 
-                ROS_ERROR("【关键验证】点云点 %d:", debug_point_count);
-                ROS_ERROR("  输入: 角度=%.1f°, 距离=%.3fm", original_angle_deg, range);
-                ROS_ERROR("  原始坐标: (%.4f, %.4f)", xx, yy);
-                ROS_ERROR("  旋转后坐标: (%.4f, %.4f), 角度=%.1f°", point.x, point.y, rotated_angle);
-                ROS_ERROR("  旋转参数: cos_theta=%.3f, sin_theta=%.3f (%.1f°)", 
-                        cos_theta, sin_theta, rotation_angle_deg);
-                
+                // ROS_ERROR("【关键验证】点云点 %d:", debug_point_count);
+                // ROS_ERROR("  输入: 角度=%.1f°, 距离=%.3fm", original_angle_deg, range);
+                // ROS_ERROR("  原始坐标: (%.4f, %.4f)", xx, yy);
+                // ROS_ERROR("  旋转后坐标: (%.4f, %.4f), 角度=%.1f°", point.x, point.y, rotated_angle);
+                // ROS_ERROR("  旋转参数: cos_theta=%.3f, sin_theta=%.3f (%.1f°)",
+                //         cos_theta, sin_theta, rotation_angle_deg);
+
                 debug_point_count++;
             }
         }
@@ -1473,18 +1473,18 @@ void MultiPositionSonarMapper::convertToPointCloud() {
         if (rotation_angle_deg == -45.0f) {
         // -45°旋转：前方可能在X和Y之间的方向
             end.x = 1.414; end.y = 1.414; end.z = 0;  // 45°方向
-            ROS_DEBUG("发布方向标记：-45°旋转，前方在45°方向");
+            // ROS_DEBUG("发布方向标记：-45°旋转，前方在45°方向");
         } else if (rotation_angle_deg == -90.0f) {
             // -90°旋转：前方在Y+方向
             end.x = 0; end.y = 2.0; end.z = 0;
-            ROS_DEBUG("发布方向标记：-90°旋转，前方在Y+方向");
+            // ROS_DEBUG("发布方向标记：-90°旋转，前方在Y+方向");
         } else {
             // 其他旋转角度
             float rad = -rotation_angle_rad;  // 注意负号
             end.x = 2.0 * cosf(rad);
             end.y = 2.0 * sinf(rad);
             end.z = 0;
-            ROS_DEBUG("发布方向标记：%.1f°旋转", rotation_angle_deg);
+            // ROS_DEBUG("发布方向标记：%.1f°旋转", rotation_angle_deg);
         }
         // 由于应用了-90°旋转，原本的前方(X+)现在变成了右方(Y+)
         // 但为了与rviz网格对齐，我们标记Y+为"前方"
@@ -1514,8 +1514,8 @@ void MultiPositionSonarMapper::convertToPointCloud() {
         marker_pub_.publish(right_marker);
         
         last_marker_time = now;
-        
-        ROS_DEBUG("发布方向标记：红色=前方(Y+)，绿色=左侧(-X)");
+
+        // ROS_DEBUG("发布方向标记：红色=前方(Y+)，绿色=左侧(-X)");
     }
 }
 
@@ -1559,14 +1559,14 @@ void MultiPositionSonarMapper::createOccupancyGrid() {
     
     if (new_map_width > map_width_ || new_map_height > map_height_) {
         need_resize = true;
-        ROS_INFO("需要扩展地图: 当前(%d,%d) → 需要(%d,%d)", 
-                 map_width_, map_height_, new_map_width, new_map_height);
+        // ROS_INFO("需要扩展地图: 当前(%d,%d) → 需要(%d,%d)",
+        //          map_width_, map_height_, new_map_width, new_map_height);
     }
     
     if (min_x < map_origin_x_ || min_y < map_origin_y_) {
         need_resize = true;
-        ROS_INFO("需要移动原点: 当前(%.1f,%.1f) → 需要(%.1f,%.1f)", 
-                 map_origin_x_, map_origin_y_, min_x, min_y);
+        // ROS_INFO("需要移动原点: 当前(%.1f,%.1f) → 需要(%.1f,%.1f)",
+        //          map_origin_x_, map_origin_y_, min_x, min_y);
     }
     
     if (need_resize) {
@@ -1581,9 +1581,9 @@ void MultiPositionSonarMapper::createOccupancyGrid() {
         occupancy_map_.info.origin.position.x = map_origin_x_;
         occupancy_map_.info.origin.position.y = map_origin_y_;
         occupancy_map_.data.resize(map_width_ * map_height_, -1);
-        
-        ROS_INFO("地图已动态扩展: %dx%d, 原点(%.1f,%.1f)", 
-                 map_width_, map_height_, map_origin_x_, map_origin_y_);
+
+        // ROS_INFO("地图已动态扩展: %dx%d, 原点(%.1f,%.1f)",
+        //          map_width_, map_height_, map_origin_x_, map_origin_y_);
     }
     
     // 5. 填充地图（现在所有点都能落在范围内）
@@ -1644,7 +1644,7 @@ void MultiPositionSonarMapper::publishMapData() {
     
     if (phase1_step_ != last_phase_step) {
         last_phase_step = phase1_step_;
-        ROS_WARN("=== publishMapData阶段变化: %d ===", phase1_step_);
+        // ROS_WARN("=== publishMapData阶段变化: %d ===", phase1_step_);
     }
     
   
@@ -1680,8 +1680,8 @@ void MultiPositionSonarMapper::publishMapData() {
         cloud_msg.header.stamp = current_time;
         cloud_msg.header.frame_id = "map";  // 修改从sonar_frame改为map
         pointcloud_pub_.publish(cloud_msg);
-        
-        ROS_DEBUG_THROTTLE(2.0, "发布点云: %lu点, 坐标系: map", pointcloud_->size());
+
+        // ROS_DEBUG_THROTTLE(2.0, "发布点云: %lu点, 坐标系: map", pointcloud_->size());
     }
 
 
@@ -1697,7 +1697,7 @@ void MultiPositionSonarMapper::publishMapData() {
     static std::string last_map_frame_id = "";
     if (occupancy_map_.header.frame_id != last_map_frame_id) {
         last_map_frame_id = occupancy_map_.header.frame_id;
-        ROS_WARN("地图坐标系变化: %s", last_map_frame_id.c_str());
+        // ROS_WARN("地图坐标系变化: %s", last_map_frame_id.c_str());
     }
     
     // 发布占据栅格地图（在map中）
@@ -1707,8 +1707,8 @@ void MultiPositionSonarMapper::publishMapData() {
         occupancy_pub_.publish(occupancy_map_);
         //同时发布到标准话题
         standard_map_pub_.publish(occupancy_map_);  // 标准话题/map
-        ROS_DEBUG_THROTTLE(2.0, "发布地图: %dx%d", 
-                          occupancy_map_.info.width, occupancy_map_.info.height);
+        // ROS_DEBUG_THROTTLE(2.0, "发布地图: %dx%d",
+        //                   occupancy_map_.info.width, occupancy_map_.info.height);
     }
 
    
@@ -2430,8 +2430,8 @@ void MultiPositionSonarMapper::saveCurrentPhase1Submap() {
     if (!pointcloud_->empty()) {
         pcl::PointXYZI min_pt, max_pt;
         pcl::getMinMax3D(*pointcloud_, min_pt, max_pt);
-        ROS_WARN("[点云范围] 位置%d: X[%.3f, %.3f], Y[%.3f, %.3f]", 
-                 phase1_current_position_, min_pt.x, max_pt.x, min_pt.y, max_pt.y);
+        // ROS_WARN("[点云范围] 位置%d: X[%.3f, %.3f], Y[%.3f, %.3f]",
+        //          phase1_current_position_, min_pt.x, max_pt.x, min_pt.y, max_pt.y);
     }
 
     // 在现有日志后添加边界框信息
@@ -2449,27 +2449,27 @@ void MultiPositionSonarMapper::saveCurrentPhase1Submap() {
             if (p.y > max_y) max_y = p.y;
         }
         
-        ROS_WARN("  边界框: X[%.3f, %.3f] (宽度:%.3fm), Y[%.3f, %.3f] (宽度:%.3fm)",
-                min_x, max_x, max_x - min_x,
-                min_y, max_y, max_y - min_y);
+        // ROS_WARN("  边界框: X[%.3f, %.3f] (宽度:%.3fm), Y[%.3f, %.3f] (宽度:%.3fm)",
+        //         min_x, max_x, max_x - min_x,
+        //         min_y, max_y, max_y - min_y);
     }
     
     int submap_idx = static_cast<int>(phase1_submaps_.size() + 1);
-    ROS_WARN(">>>> 保存子地图%d (位置%d):", submap_idx, phase1_current_position_);
+    // ROS_WARN(">>>> 保存子地图%d (位置%d):", submap_idx, phase1_current_position_);
 
     
     if (!pointcloud_->empty()) {
         int point_count = static_cast<int>(pointcloud_->size());
         
         // 检查前3个点的坐标和角度
-        ROS_WARN("  前3个点云点(转换后):");
-        for (int i = 0; i < std::min(3, point_count); i++) {
-            const auto& p = pointcloud_->points[i];
-            float angle = atan2(p.y, p.x) * RAD_TO_DEG;
-            float dist = sqrt(p.x*p.x + p.y*p.y);
-            ROS_WARN("    点%d: (%.4f, %.4f), 距离=%.3f, 角度=%.1f°", 
-                    i, p.x, p.y, dist, angle);
-        }
+        // ROS_WARN("  前3个点云点(转换后):");
+        // for (int i = 0; i < std::min(3, point_count); i++) {
+        //     const auto& p = pointcloud_->points[i];
+        //     float angle = atan2(p.y, p.x) * RAD_TO_DEG;
+        //     float dist = sqrt(p.x*p.x + p.y*p.y);
+        //     ROS_WARN("    点%d: (%.4f, %.4f), 距离=%.3f, 角度=%.1f°",
+        //             i, p.x, p.y, dist, angle);
+        // }
         
         
         // 快速计算质心
@@ -2480,7 +2480,7 @@ void MultiPositionSonarMapper::saveCurrentPhase1Submap() {
         }
         float center_x = sum_x / pointcloud_->size();
         float center_y = sum_y / pointcloud_->size();
-        ROS_WARN("  点云质心: (%.3f, %.3f)", center_x, center_y);
+        // ROS_WARN("  点云质心: (%.3f, %.3f)", center_x, center_y);
         
         // 检查角度分布
         int front = 0, right = 0, back = 0, left = 0;
@@ -2491,7 +2491,7 @@ void MultiPositionSonarMapper::saveCurrentPhase1Submap() {
             else if (angle >= 135 || angle < -135) back++;
             else left++;
         }
-        ROS_WARN("  方向分布: 前%d, 右%d, 后%d, 左%d", front, right, back, left);
+        // ROS_WARN("  方向分布: 前%d, 右%d, 后%d, 左%d", front, right, back, left);
         
         // 检查点云统计
         int high_intensity = 0, medium_intensity = 0, low_intensity = 0;
@@ -2500,10 +2500,10 @@ void MultiPositionSonarMapper::saveCurrentPhase1Submap() {
             else if (p.intensity >= 140.0f) medium_intensity++;
             else low_intensity++;
         }
-        ROS_WARN("  强度分布: 高≥160=%d, 中≥140=%d, 低=%d", 
-                high_intensity, medium_intensity, low_intensity);
+        // ROS_WARN("  强度分布: 高≥160=%d, 中≥140=%d, 低=%d",
+        //         high_intensity, medium_intensity, low_intensity);
     } else {
-        ROS_WARN("  警告：点云为空！");
+        // ROS_WARN("  警告：点云为空！");
     }
     // ========== 子地图关键点检查结束 ==========
     
@@ -2522,8 +2522,8 @@ void MultiPositionSonarMapper::saveCurrentPhase1Submap() {
         submap.center_x = sum_x / pointcloud_->size();
         submap.center_y = sum_y / pointcloud_->size();
         
-        ROS_WARN("子地图%d质心记录: (%.3f, %.3f)", 
-                submap.index, submap.center_x, submap.center_y);
+        // ROS_WARN("子地图%d质心记录: (%.3f, %.3f)",
+        //         submap.index, submap.center_x, submap.center_y);
     }
     
     geometry_msgs::Pose2D robot_pose;
@@ -2750,8 +2750,8 @@ void MultiPositionSonarMapper::publishRobotPositionMarkers() {
     static ros::Publisher debug_pub = nh_.advertise<visualization_msgs::MarkerArray>(
         "/phase1/debug_markers", 1, true);
     debug_pub.publish(marker_array);
-    
-    ROS_INFO("已发布调试标记到 /phase1/debug_markers");
+
+    // ROS_INFO("已发布调试标记到 /phase1/debug_markers");
 }
 
 void MultiPositionSonarMapper::publishPhase1Status(const std::string& status) {
@@ -2871,23 +2871,23 @@ std::string MultiPositionSonarMapper::getPhase1StatusString() const {
     return ss.str();
 }
 
-void MultiPositionSonarMapper::printPhase1DebugInfo() {
-    ROS_INFO("=== Phase1 调试信息 ===");
-    ROS_INFO("启用状态: %s", phase1_enabled_ ? "true" : "false");
-    ROS_INFO("当前步骤: %d", phase1_step_);
-    ROS_INFO("扫描状态: %s", is_scanning_.load() ? "进行中" : "停止");
-    ROS_INFO("子地图数量: %d", phase1_submap_count_);
-    
-    if (phase1_step_ > 0) {
-        ros::Duration elapsed = ros::Time::now() - phase1_step_start_time_;
-        ROS_INFO("当前步骤已进行: %.1f 秒", elapsed.toSec());
-    }
-    
-    ROS_INFO("扫描时长: %.1f 秒", phase1_scan_duration_);
-    ROS_INFO("等待时长: %.1f 秒", phase1_wait_duration_);
-    ROS_INFO("移动距离: %.2f 米", phase1_move_distance_);
-    ROS_INFO("=========================");
-}
+// void MultiPositionSonarMapper::printPhase1DebugInfo() {
+//     ROS_INFO("=== Phase1 调试信息 ===");
+//     ROS_INFO("启用状态: %s", phase1_enabled_ ? "true" : "false");
+//     ROS_INFO("当前步骤: %d", phase1_step_);
+//     ROS_INFO("扫描状态: %s", is_scanning_.load() ? "进行中" : "停止");
+//     ROS_INFO("子地图数量: %d", phase1_submap_count_);
+//
+//     if (phase1_step_ > 0) {
+//         ros::Duration elapsed = ros::Time::now() - phase1_step_start_time_;
+//         ROS_INFO("当前步骤已进行: %.1f 秒", elapsed.toSec());
+//     }
+//
+//     ROS_INFO("扫描时长: %.1f 秒", phase1_scan_duration_);
+//     ROS_INFO("等待时长: %.1f 秒", phase1_wait_duration_);
+//     ROS_INFO("移动距离: %.2f 米", phase1_move_distance_);
+//     ROS_INFO("=========================");
+// }
 
  
  
@@ -3238,8 +3238,8 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
  
 // ======================== 保存多位置子地图 ========================
 void MultiPositionSonarMapper::saveCurrentPhaseMultiSubmap() {
-    ROS_ERROR("=== saveCurrentPhaseMultiSubmap 开始，当前 pointcloud_ 大小: %lu ===", 
-              pointcloud_ ? pointcloud_->size() : 0);
+    // ROS_ERROR("=== saveCurrentPhaseMultiSubmap 开始，当前 pointcloud_ 大小: %lu ===",
+    //           pointcloud_ ? pointcloud_->size() : 0);
    
     if (phase_multi_submaps_.size() >= phase_multi_num_positions_) {
         ROS_WARN("已经保存了 %lu 个子地图，达到目标位置数 %d", 

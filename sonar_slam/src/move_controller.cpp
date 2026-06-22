@@ -740,9 +740,9 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 dbg_e_head_deg_   = (float)(e_head * RAD_TO_DEG);
                 dbg_wall_d_ = d; dbg_e_par_ = e_par; dbg_C_ = C; dbg_u_ = (float)u;
                 dbg_mode_ = ultra_ok ? 1 : 2;
-                ROS_INFO_THROTTLE(1.0,
-                    "沿墙(串级): d=%.2f e_par=%.3f C=%.3f | imu_e=%.1fdeg u=%.3f mode=%d",
-                    d, e_par, C, dbg_e_head_deg_, dbg_u_, dbg_mode_);
+//                ROS_INFO_THROTTLE(1.0,
+//                    "沿墙(串级): d=%.2f e_par=%.3f C=%.3f | imu_e=%.1fdeg u=%.3f mode=%d",
+//                    d, e_par, C, dbg_e_head_deg_, dbg_u_, dbg_mode_);
             } else {
                 // ======== 退化: /imu_heading 不可用 → doc 分支原逻辑(超声直接出角速度 + odom兜底) ========
                 const float K_ODOM_HOLD = 1.0f;
@@ -773,13 +773,13 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
         cmd_vel_pub_.publish(cmd);
         
         // 进度打印
-        static ros::Time last_print = ros::Time::now();
-        if ((ros::Time::now() - last_print).toSec() > 1.0) {
-            float progress = (total_accumulated_distance / total_target) * 100.0f;
-            ROS_INFO("进度: %.1f%%, 已走%.2f/%.2f米, 偏角:%.1f°", 
-                     progress, total_accumulated_distance, total_target, relative_theta * RAD_TO_DEG);
-            last_print = ros::Time::now();
-        }
+//        static ros::Time last_print = ros::Time::now();
+//        if ((ros::Time::now() - last_print).toSec() > 1.0) {
+//            float progress = (total_accumulated_distance / total_target) * 100.0f;
+//            ROS_INFO("进度: %.1f%%, 已走%.2f/%.2f米, 偏角:%.1f°",
+//                     progress, total_accumulated_distance, total_target, relative_theta * RAD_TO_DEG);
+//            last_print = ros::Time::now();
+//        }
         
         ros::spinOnce();
         ros::Duration(0.05).sleep();
