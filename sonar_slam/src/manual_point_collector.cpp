@@ -65,6 +65,8 @@ const size_t RX_BUFFER_SIZE = 40960;
 const uint16_t MAX_RAW_POINTS = 1200;
 }
 
+#define COLLECTOR_VERSION "manual-collect-fullodom-assoc-20260622"
+
 // ======================== 声呐 2300 消息结构(与硬件协议一致, 移植自 mapper 头) ========================
 #pragma pack(push, 1)
 struct MsgCmd2300 {
@@ -137,7 +139,11 @@ private:
     bool saveMapAsYAML(const std::string& filename, const std::string& pgm_file, const nav_msgs::OccupancyGrid& map);
     std::string mapsDir();
     void writeMeta(const std::string& dir, const ros::Time& t_start, const ros::Time& t_end,
-                   size_t n_frames, bool aborted, size_t angles_with_echo);
+                   size_t n_frames, bool aborted, size_t angles_with_echo,
+                   double px, double py, double pyaw, long seq_a, long seq_b);
+
+    // ---- 全程连续 odom 记录 + 声呐<->odom 关联 ----
+    void writeOdomFullMarker(const std::string& event);
 
     static bool ensureDir(const std::string& path);
 
@@ -205,6 +211,15 @@ private:
     std::string task_dir_;
     bool task_dir_ok_;
     int point_counter_;
+
+    // 全程连续 odom 记录 + 声呐<->odom 关联(仅 main 线程访问: odomCallback/runCollect, 无需锁)
+    bool record_full_odom_;            // 开关, 默认 true
+    std::ofstream odom_full_ofs_;      // task 夹一份, 连续全程(节点启动起记录)
+    long odom_seq_;                    // odom_full 行号(单调), 初始 0
+    int  active_point_id_;             // 0=开车途中; N=正扫第N点; 初始 0
+    ros::Time last_full_flush_;        // 周期 flush 计时
+    std::ofstream points_index_ofs_;   // task 夹一份, 每点一行的清单(声呐<->odom 索引)
+    std::string task_stamp_;           // task 时间戳(供 meta task_id)
 };
 
 // ======================== 构造 / 析构 ========================
@@ -217,7 +232,10 @@ ManualPointCollector::ManualPointCollector()
       angle_received_(400, 0),
       have_odom_(false),
       task_dir_ok_(false),
-      point_counter_(0)
+      point_counter_(0),
+      record_full_odom_(true),
+      odom_seq_(0),
+      active_point_id_(0)
 {
     current_message_.clear();
     latest_odom_ = OdomSample{0, 0, 0, 0, 0, 0};
@@ -291,7 +309,27 @@ ManualPointCollector::ManualPointCollector()
                   task_dir_.c_str());
     }
 
-    ROS_INFO("manual_point_collector params:");
+    // 全程连续 odom 记录开关 + 两个 task 级文件(odom_full.csv / points_index.csv)
+    pnh_.param("record_full_odom", record_full_odom_, true);
+    task_stamp_ = ts;   // ts 是上面 strftime 的时间戳缓冲, 仍在作用域
+    if (task_dir_ok_ && record_full_odom_) {
+        odom_full_ofs_.open(task_dir_ + "odom_full.csv", std::ios::out | std::ios::trunc);
+        if (odom_full_ofs_.is_open()) {
+            odom_full_ofs_ << "seq,wall_t,odom_stamp,x,y,yaw_rad,twist_vx,twist_wz,active_point_id,event\n";
+        } else {
+            ROS_WARN("cannot open odom_full.csv -- continuous odom track will be MISSING");
+        }
+        points_index_ofs_.open(task_dir_ + "points_index.csv", std::ios::out | std::ios::trunc);
+        if (points_index_ofs_.is_open()) {
+            points_index_ofs_ << "point_id,deliverable_basename,point_dir,scan_start_wall,scan_end_wall,"
+                                 "x_at_scan,y_at_scan,yaw_at_scan,sonar_frames,sweep_complete,"
+                                 "angles_with_echo,odom_full_seq_start,odom_full_seq_end\n";
+        } else {
+            ROS_WARN("cannot open points_index.csv -- sonar<->odom index will be MISSING");
+        }
+    }
+
+    ROS_INFO("manual_point_collector COLLECTOR_VERSION=%s params:", COLLECTOR_VERSION);
     ROS_INFO("  serial_port=%s baudrate=%d", serial_port_.c_str(), baudrate_);
     ROS_INFO("  mode=single 360deg sweep (400 angles) per record; range_level=%s (max_range=%.2fm)",
              range_level_.c_str(), max_range_);
@@ -299,6 +337,8 @@ ManualPointCollector::ManualPointCollector()
              angle_timeout_sec_, scan_timeout_sec_);
     ROS_INFO("  odom_rate=%.1fHz min_range=%.2fm", odom_rate_hz_, min_range_);
     ROS_INFO("  task_dir=%s", task_dir_.c_str());
+    ROS_INFO("  full odom track -> %sodom_full.csv ; sonar<->odom index -> %spoints_index.csv (record_full_odom=%d)",
+             task_dir_.c_str(), task_dir_.c_str(), (int)record_full_odom_);
 
     if (!initSerial(serial_port_, static_cast<unsigned int>(baudrate_))) {
         ROS_ERROR("sonar serial init FAILED on %s -- no sonar data will be collected", serial_port_.c_str());
@@ -316,6 +356,8 @@ ManualPointCollector::ManualPointCollector()
 ManualPointCollector::~ManualPointCollector() {
     is_scanning_.store(false);
     collecting_.store(false);
+    if (odom_full_ofs_.is_open())    { odom_full_ofs_.flush();    odom_full_ofs_.close(); }
+    if (points_index_ofs_.is_open()) { points_index_ofs_.flush(); points_index_ofs_.close(); }
     if (sonar_serial_) {
         try { sonar_serial_->close(); } catch (...) {}
     }
@@ -584,6 +626,38 @@ void ManualPointCollector::odomCallback(const nav_msgs::Odometry::ConstPtr& msg)
     latest_odom_.vx = msg->twist.twist.linear.x;
     latest_odom_.wz = msg->twist.twist.angular.z;
     have_odom_ = true;
+
+    // 全程连续记录(仅 main 线程): 每条 /wheel_odom 写一行到 task 级 odom_full.csv。
+    // 普通行 event 字段留空; 扫描起止边界由 writeOdomFullMarker() 另写带 event 的行。
+    if (odom_full_ofs_.is_open()) {
+        ros::Time now = ros::Time::now();
+        odom_full_ofs_ << (odom_seq_++) << ","
+                       << std::fixed << std::setprecision(6)
+                       << now.toSec() << ","
+                       << latest_odom_.stamp << ","
+                       << latest_odom_.x << "," << latest_odom_.y << "," << latest_odom_.yaw << ","
+                       << latest_odom_.vx << "," << latest_odom_.wz << ","
+                       << active_point_id_ << ",\n";
+        if ((now - last_full_flush_).toSec() >= 1.0) {
+            odom_full_ofs_.flush();
+            last_full_flush_ = now;
+        }
+    }
+}
+
+// ======================== odom_full 边界标记行(扫描起止; 仅 main 线程) ========================
+// 写一行(与普通行同 10 列), event 字段=传入字符串(如 POINT_3_SCAN_START); 写完立即 flush。
+void ManualPointCollector::writeOdomFullMarker(const std::string& event) {
+    if (!odom_full_ofs_.is_open()) return;
+    ros::Time now = ros::Time::now();
+    odom_full_ofs_ << (odom_seq_++) << ","
+                   << std::fixed << std::setprecision(6)
+                   << now.toSec() << ","
+                   << latest_odom_.stamp << ","
+                   << latest_odom_.x << "," << latest_odom_.y << "," << latest_odom_.yaw << ","
+                   << latest_odom_.vx << "," << latest_odom_.wz << ","
+                   << active_point_id_ << "," << event << "\n";
+    odom_full_ofs_.flush();
 }
 
 // ======================== 服务: 触发采一个点位 ========================
@@ -664,6 +738,12 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     }
     collecting_.store(true);
 
+    // 关联: 标活动点 id, 在 odom_full 写起始边界, 快照扫描起始 odom 位姿 + seq 起点。
+    active_point_id_ = point_counter_;
+    double px = latest_odom_.x, py = latest_odom_.y, pyaw = latest_odom_.yaw;
+    long seq_start = odom_seq_;
+    writeOdomFullMarker("POINT_" + std::to_string(point_counter_) + "_SCAN_START");
+
     const double odom_period = 1.0 / odom_rate_hz_;
     ros::Time scan_start = ros::Time::now();
     ros::Time next_odom = scan_start;
@@ -717,6 +797,10 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     if (aborted) ROS_WARN("sweep did not cover all 400 angles (safety timeout or shutdown); cloud/summary PARTIAL");
 
     collecting_.store(false);
+    // 关联: 写结束边界, 记 seq 终点, 复位活动点 id(回到"开车途中"=0)。
+    writeOdomFullMarker("POINT_" + std::to_string(point_counter_) + "_SCAN_END");
+    long seq_end = odom_seq_;
+    active_point_id_ = 0;
     if (odom_ofs.is_open()) { odom_ofs.flush(); odom_ofs.close(); }
 
     // 快照帧(脱离锁后落盘)
@@ -741,16 +825,19 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     pcl::PointCloud<pcl::PointXYZI> cloud = buildCloud(snap, angle_base);
 
     // ==== 给声呐方的交付三件套: 照原版终端4 -> ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml} ====
+    const std::string deliverable_base = "phase_multi_submap_" + std::to_string(point_counter_)
+                                       + "_pos" + std::to_string(point_counter_);
+    bool deliverable_written = false;
     if (!cloud.points.empty()) {
         const std::string md = mapsDir();
         if (!md.empty()) {
-            const std::string base = "phase_multi_submap_" + std::to_string(point_counter_)
-                                   + "_pos" + std::to_string(point_counter_);
+            const std::string& base = deliverable_base;
             writeBinaryPcd(md + base + ".pcd", cloud);        // 二进制(同原版格式, ofstream 直写绕开 PCL mmap)
             createOccupancyGrid(cloud);                        // -> occupancy_map_
             saveMapAsPGM(md + base + ".pgm", occupancy_map_);
             saveMapAsYAML(md + base + ".yaml", base + ".pgm", occupancy_map_);
             ROS_INFO("sonar deliverable triple -> %s{.pcd,.pgm,.yaml}", (md + base).c_str());
+            deliverable_written = true;
         } else {
             ROS_WARN("maps dir unavailable -> sonar triple SKIPPED (only local extras saved)");
         }
@@ -760,7 +847,24 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     writeAsciiPcd(point_dir + "cloud.pcd", cloud);
     writeRawCsv(point_dir, snap);
     writeSummaryCsv(point_dir, snap, angle_base);
-    writeMeta(point_dir, scan_start, t_end, snap.size(), aborted, angles_with_echo);
+    writeMeta(point_dir, scan_start, t_end, snap.size(), aborted, angles_with_echo,
+              px, py, pyaw, seq_start, seq_end);
+
+    // 声呐<->odom 索引: 每点一行追加到 task 级 points_index.csv(列与表头严格对齐)。
+    if (points_index_ofs_.is_open()) {
+        points_index_ofs_ << point_counter_ << ","
+                          << (deliverable_written ? deliverable_base : std::string("(none)")) << ","
+                          << point_dir << ","
+                          << std::fixed << std::setprecision(6)
+                          << scan_start.toSec() << "," << t_end.toSec() << ","
+                          << px << "," << py << "," << pyaw << ","
+                          << snap.size() << ","
+                          << (aborted ? "false" : "true") << ","
+                          << angles_with_echo << ","
+                          << seq_start << "," << seq_end << "\n";
+        points_index_ofs_.flush();
+    }
+
     if (snap.empty()) {
         ROS_WARN("NO sonar frames captured -- check sonar serial / range_level / robot in-water");
     }
@@ -1066,7 +1170,9 @@ bool ManualPointCollector::saveMapAsYAML(const std::string& filename,
 // ======================== 落盘: meta ========================
 void ManualPointCollector::writeMeta(const std::string& dir, const ros::Time& t_start,
                                      const ros::Time& t_end, size_t n_frames,
-                                     bool aborted, size_t angles_with_echo) {
+                                     bool aborted, size_t angles_with_echo,
+                                     double px, double py, double pyaw,
+                                     long seq_a, long seq_b) {
     std::ofstream f(dir + "meta.txt", std::ios::out | std::ios::trunc);
     if (!f.is_open()) { ROS_WARN("cannot open meta.txt"); return; }
     std::time_t st = static_cast<std::time_t>(t_start.toSec());
@@ -1094,6 +1200,23 @@ void ManualPointCollector::writeMeta(const std::string& dir, const ros::Time& t_
       << "note=this node commands sonar transmits but NEVER /cmd_vel/motor/pump; motion is operator teleop.\n"
       << "note=summary/cloud angle axis = raw device angle (angle_base=0); each frame placed at its own reported angle.\n"
       << "note=RX frames are NOT checksum-validated (parity with original mapper); sonar_raw.csv keeps number_of_samples & data_length for offline validity checks.\n";
+
+    // ---- sonar<->odom association block ----
+    f << "task_id=" << task_stamp_ << "\n"
+      << "point_id=" << point_counter_ << "\n"
+      << "scan_start_wall_unix=" << std::fixed << std::setprecision(6) << t_start.toSec() << "\n"
+      << "scan_end_wall_unix=" << t_end.toSec() << "\n"
+      << "odom_pose_at_scan=[" << px << ", " << py << ", " << pyaw
+      << "]  (x_m,y_m,yaw_rad from /wheel_odom at scan start)\n";
+    if (record_full_odom_) {
+        f << "odom_full=../odom_full.csv  (rows with active_point_id==point_id are this scan; "
+             "plus POINT_" << point_counter_ << "_SCAN_START/END markers)\n"
+          << "odom_full_seq_range=[" << seq_a << ", " << seq_b << "]\n";
+    } else {
+        f << "odom_full=disabled\n";
+    }
+    f << "assoc_note=join sonar->odom by wall-clock time (sonar_raw.csv wall_t vs scan_start/end_wall_unix) "
+         "OR by point_id via ../points_index.csv\n";
     f.close();
 }
 
