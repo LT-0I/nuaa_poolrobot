@@ -679,8 +679,8 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
             aborted = true;
             break;
         }
-        ROS_INFO_THROTTLE(5.0, "sweeping... angle=%u/400 (%.0fs elapsed)",
-                          angle, (ros::Time::now() - scan_start).toSec());
+//        ROS_INFO_THROTTLE(5.0, "sweeping... angle=%u/400 (%.0fs elapsed)",
+//                          angle, (ros::Time::now() - scan_start).toSec());
         // 1. 先清本角接收标志(必须在发命令前: 否则极快回包会被这次清零吞掉->空等)
         {
             std::lock_guard<std::mutex> lk(frame_mutex_);
@@ -955,8 +955,8 @@ void ManualPointCollector::createOccupancyGrid(const pcl::PointCloud<pcl::PointX
         occupancy_map_.info.origin.position.x = map_origin_x_;
         occupancy_map_.info.origin.position.y = map_origin_y_;
         occupancy_map_.data.resize(static_cast<size_t>(map_width_) * map_height_, -1);
-        ROS_INFO("occupancy grid resized: %dx%d origin(%.1f,%.1f)",
-                 map_width_, map_height_, map_origin_x_, map_origin_y_);
+//        ROS_INFO("occupancy grid resized: %dx%d origin(%.1f,%.1f)",
+//                 map_width_, map_height_, map_origin_x_, map_origin_y_);
     }
 
     // 5. 填充地图(只标占据格: occ=intensity*100/255 取最大; 其余保持 -1=未知, 不做空闲射线标记)
