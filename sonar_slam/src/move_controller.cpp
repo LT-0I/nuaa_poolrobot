@@ -806,7 +806,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     return success;
 }
 // ==================== 下水自启: 旋转找侧壁 → 对齐 → 进入沿边 ====================
-// 安全铁律: 本相位纯原地偏航(linear.x=0 绝不前进), 全程 ≤0.05s 持续 publish(doc 沿边轨无 /cmd_vel 看门狗→失败即 stop() 发零, 不留残命令)。
+// 安全铁律: 本相位纯原地偏航(linear.x=0 绝不前进=不冲墙的根本), 全程 ≤0.05s 持续 publish; 失败即 stop() 发零电机不留残命令(驱动另有 0.5s /cmd_vel 看门狗·只停电机)。
 // 朝墙角 = 右得墙但前被挡 → 拒绝该航向继续转; 仅"右两路有效一致【且前净空】"才锁定 → 起步绝不冲墙(对应用户硬要求)。
 // 采集用"停-核验": 慢扫到候选航向先停转再核验, 使扫速不影响确认(镜面壁窄法向窗也不会被扫过漏掉)。
 bool MoveController::findWallAndFollow(float follow_distance, float timeout) {
@@ -840,9 +840,9 @@ bool MoveController::findWallAndFollow(float follow_distance, float timeout) {
 
     const float max_rot_rad = config_findwall_max_rot_deg_ * DEG2RAD;
     const float omega = config_findwall_turn_left_ ? config_findwall_omega_ : -config_findwall_omega_;
-    // 泵(linear.y): ACQUIRE 为纯偏航侦察 → 旋转/停稳全程【强制关泵(0)、与是否闩锁无关】(评审 MEDIUM): 杜绝泵推力在原地转时
-    //   产生前向漂移、把离壁很近的机体顶上墙(本分支无 /cmd_vel 看门狗)。不改 run_pump_latched_ 闩锁态本身——失败 stop() 与
-    //   交回 walkStraight 时各自按 live 闩锁恢复泵, 故此处恒置 0 不扰闩锁。
+    // 泵(linear.y=占空比): ACQUIRE 纯偏航不前进 → 旋转/停稳全程【强制关泵(0)、与是否闩锁无关】。
+    //   理由=防干转: 泵是吸底清洁泵不产生推力, 原地不前进时开泵只会空抽损泵(与 walkStraight"仅真正前进才开泵"同口径); 不冲墙由 linear.x=0 保证, 与泵无关。
+    //   不改 run_pump_latched_ 闩锁态本身——失败 stop() 与交回 walkStraight 时各自按 live 闩锁恢复泵, 故此处恒置 0 不扰闩锁。
     const float pump = 0.0f;
 
     ros::Time t0 = ros::Time::now();
