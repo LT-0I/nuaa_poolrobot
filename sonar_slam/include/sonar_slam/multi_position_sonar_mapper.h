@@ -246,6 +246,7 @@ public:
     void startScanning();
     void openPumpLatch();   // 运行级水泵闩锁: 任务起始置 /move_controller/pump_enable=true(整段持泵)
     void closePumpLatch();  // 任务结束/中止置 false(撤闩, 回落单段策略)
+    void publishSessionDone();  // 采集全完成时发会话目录(触发离线拼图); 仅完成路径调用, enable_stitch_ 门控
     
     /**
      * @brief 停止扫描
@@ -648,6 +649,8 @@ private:
     float acquire_distance_ = 0.5f;           // 找墙对齐后先沿边行走距离(米)
     ros::Publisher pump_enable_pub_;          // /move_controller/pump_enable 运行级水泵闩锁(std_msgs::Bool, latched)
     bool pump_latch_published_open_ = false;  // 幂等闸: 防重复 open/close
+    ros::Publisher session_done_pub_;         // /sonar_scan/session_done 采集完成信号(std_msgs::String=会话目录) 触发离线拼图节点; latched
+    bool enable_stitch_ = true;               // 拼图开关(私有参数 ~enable_stitch); false=不发完成信号(行为同接入前)
 
         // 角度信息结构体
     struct AngleInfo {

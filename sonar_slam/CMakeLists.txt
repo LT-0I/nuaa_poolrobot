@@ -736,6 +736,17 @@ if(TARGET multi_position_sonar_mapper)
 endif()
 
 # ==============================================
+# 安装 Python 拼图脚本 (离线点云拼接 + 自动触发节点)
+#   sonar_stitch.py      : 拼接算法(逐字搬自原拼图程序) + 路径参数化
+#   sonar_stitch_node.py : 订阅 /sonar_scan/session_done 采集完成后自动触发拼图
+# ==============================================
+catkin_install_python(PROGRAMS
+  scripts/sonar_stitch.py
+  scripts/sonar_stitch_node.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+# ==============================================
 # 安装其他文件
 # ==============================================
 

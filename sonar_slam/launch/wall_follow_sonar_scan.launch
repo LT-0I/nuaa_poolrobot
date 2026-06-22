@@ -32,6 +32,9 @@
   <arg name="acquire_wall_first" default="false"/>
   <arg name="acquire_distance"  default="0.5"/>           <!-- acquire_wall_first=true 时, 找墙对齐后先沿边的距离(米) -->
 
+  <!-- ===== 拼图开关 ===== -->
+  <arg name="enable_stitch"     default="true"/>          <!-- true=采集全部停点完成后自动离线拼图(出 <session>/stitching.pcd); false=只采集不拼(行为同接入前)。拼图需机上装 open3d/scipy/pandas -->
+
   <!-- ===== 沿边整定参数 (move_controller 读全局命名空间; 填 step1-3 调好的值, 默认=代码现场默认) ===== -->
   <arg name="wall_align"        default="3.0"/>           <!-- 目标离墙距离(米) [step1 核心] -->
   <arg name="wall_k_dist"       default="0.20"/>          <!-- 距墙距离环增益 [step1] -->
@@ -67,6 +70,13 @@
     <param name="phase1/wait_duration"    value="$(arg wait_duration)"/>
     <param name="phase1/acquire_wall_first" value="$(arg acquire_wall_first)"/>
     <param name="phase1/acquire_distance" value="$(arg acquire_distance)"/>
+    <param name="enable_stitch"           value="$(arg enable_stitch)"/>   <!-- 私有 ~enable_stitch: 采集完成是否发 /sonar_scan/session_done -->
   </node>
+
+  <!-- 拼图节点(离线后处理, 受 enable_stitch 门控): 订阅 /sonar_scan/session_done -> 对会话目录跑 sonar_stitch.py
+       -> 出 <session>/stitching.pcd -> 发 /sonar_stitch/cloud(RViz) /sonar_stitch/done。
+       需机上装 open3d/scipy/pandas/numpy; 缺依赖会打 ASCII 提示并跳过, 不影响采集。 -->
+  <node if="$(arg enable_stitch)" pkg="sonar_slam" type="sonar_stitch_node.py"
+        name="sonar_stitch_node" output="screen"/>
 
 </launch>

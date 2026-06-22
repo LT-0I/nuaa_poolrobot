@@ -52,7 +52,7 @@
 #include <limits>     // FLT_MAX
 
 // 版本横幅(grep 自判): 改行为必改此串。本轮= 沿边+声呐采集入口(智能会话目录 + 可选找墙自启)
-#define MULTIMAP_VERSION "wallscan-smartdir-acquire-20260621"
+#define MULTIMAP_VERSION "wallscan-smartdir-acquire-stitchhook-20260622"
 
 namespace sonar_slam {
 
@@ -233,6 +233,8 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     // 沿边+声呐入口: 扫描前先找墙对齐(下水自启), 默认关; 由 wall_follow_sonar_scan.launch 置真。命名空间沿用 phase1/
     nh_.param("phase1/acquire_wall_first", acquire_wall_first_, false);
     nh_.param("phase1/acquire_distance", acquire_distance_, 0.5f);
+    // 拼图开关(私有 ~enable_stitch): true=采集全部停点完成时发会话目录, 触发离线拼图节点; false=不发(行为同接入前)
+    nh_.param("enable_stitch", enable_stitch_, true);
     
  
     
@@ -250,6 +252,9 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     phase_multi_submap_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/phase_multi/submaps", 1, true);
     // 运行级水泵闩锁发布器(latched): 任务起始 true / 结束·中止 false → move_controller 整段持泵
     pump_enable_pub_ = nh_.advertise<std_msgs::Bool>("/move_controller/pump_enable", 1, true);
+    // 采集完成信号(latched): 采集全部停点完成时发本次会话目录(绝对路径), 触发离线拼图节点 sonar_stitch_node
+    session_done_pub_ = nh_.advertise<std_msgs::String>("/sonar_scan/session_done", 1, true);
+    ROS_INFO("[%s] enable_stitch=%s", MULTIMAP_VERSION, enable_stitch_ ? "true" : "false");
     // 添加标准地图发布器
     standard_map_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("/map", 1, true);
     
@@ -2963,6 +2968,17 @@ void MultiPositionSonarMapper::closePumpLatch() {
     ROS_INFO("pump latch CLOSED (run end)");
 }
 
+void MultiPositionSonarMapper::publishSessionDone() {
+    // 采集全部停点完成后调用(仅正常/超时完成路径, 不在中止/失败路径); 发本次会话目录触发离线拼图。
+    // enable_stitch_=false 时不发, 行为同接入前。session_dir_ 在构造期已建, 此刻 maps/odom 已全部落盘+flush。
+    if (!enable_stitch_) return;
+    std_msgs::String m;
+    m.data = session_dir_;
+    session_done_pub_.publish(m);
+    ROS_INFO("[%s] scan complete, published /sonar_scan/session_done = %s",
+             MULTIMAP_VERSION, session_dir_.c_str());
+}
+
 // ======================== 多位置建图主函数  ========================
 
 void MultiPositionSonarMapper::handlePhaseMultiMapping() {
@@ -3028,6 +3044,7 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
                         stopScanning();
                     }
                     closePumpLatch();   // 任务正常结束: 机器人已静止, 撤闩关泵
+                    publishSessionDone();  // 采集全完成 → 发会话目录触发离线拼图(enable_stitch_ 门控)
 
                     // 根据位置数量决定是否自动合并
                     if (phase_multi_num_positions_ <= 10) {
@@ -3074,6 +3091,7 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
             if (current_pos >= phase_multi_num_positions_) {
                 if (is_scanning_.load()) stopScanning();
                 closePumpLatch();   // 任务结束(超时分支): 撤闩关泵
+                publishSessionDone();  // 采集全完成(超时分支) → 发会话目录触发离线拼图
 
                 if (phase_multi_num_positions_ <= 10) {
                     phase_multi_step_ = 100;
