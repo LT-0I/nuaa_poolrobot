@@ -403,9 +403,9 @@ void MotionController::distDatasCallback(const std_msgs::Int32MultiArray::ConstP
 {
     static int debug_count = 0;
     if (debug_count++ % 50 == 0) {  // 每50次回调输出一次
-        ROS_INFO_THROTTLE(1.0, "=== Ultrasound Data ===");
-        ROS_INFO_THROTTLE(1.0, "Raw [0]=%d(FR) [1]=%d(FL) [2]=%d(LF) [3]=%d(LB) (mm)", 
-                         msg->data[0], msg->data[1], msg->data[2], msg->data[3]);
+//        ROS_INFO_THROTTLE(1.0, "=== Ultrasound Data ===");
+//        ROS_INFO_THROTTLE(1.0, "Raw [0]=%d(FR) [1]=%d(FL) [2]=%d(LF) [3]=%d(LB) (mm)",
+//                         msg->data[0], msg->data[1], msg->data[2], msg->data[3]);
     }
 
     
@@ -439,10 +439,10 @@ void MotionController::distDatasCallback(const std_msgs::Int32MultiArray::ConstP
     dis_f_min = (dis_f_r > dis_f_l) ? dis_f_l : dis_f_r; // 前传感器最小距离
 
     if (debug_count % 50 == 0) {
-        ROS_INFO_THROTTLE(1.0, "Processed (m): FL=%.3f, FR=%.3f, LF=%.3f, LB=%.3f", 
-                         dis_f_l, dis_f_r, dis_l_f, dis_l_b);
-        ROS_INFO_THROTTLE(1.0, "Front min: %.3f m, Counters: L=%d, R=%d", 
-                         dis_f_min, cnt_l, cnt_r);
+//        ROS_INFO_THROTTLE(1.0, "Processed (m): FL=%.3f, FR=%.3f, LF=%.3f, LB=%.3f",
+//                         dis_f_l, dis_f_r, dis_l_f, dis_l_b);
+//        ROS_INFO_THROTTLE(1.0, "Front min: %.3f m, Counters: L=%d, R=%d",
+//                         dis_f_min, cnt_l, cnt_r);
     }
 
 
@@ -567,10 +567,10 @@ void MotionController::FindWall()
 // 沿边跟踪
 void MotionController::TraceWall()
 {   
-    ROS_INFO_THROTTLE(1.0, "=== TraceWall ===");
-    ROS_INFO_THROTTLE(1.0, "Sweep Action: %d", sweep_action);
-    ROS_INFO_THROTTLE(1.0, "Sensor data: LF=%.3f, LB=%.3f, FL=%.3f, FR=%.3f", 
-                      dis_l_f, dis_l_b, dis_f_l, dis_f_r);
+//    ROS_INFO_THROTTLE(1.0, "=== TraceWall ===");
+//    ROS_INFO_THROTTLE(1.0, "Sweep Action: %d", sweep_action);
+//    ROS_INFO_THROTTLE(1.0, "Sensor data: LF=%.3f, LB=%.3f, FL=%.3f, FR=%.3f",
+//                      dis_l_f, dis_l_b, dis_f_l, dis_f_r);
 
 
     const double dis = 0.0; // 目标距离
@@ -612,8 +612,8 @@ void MotionController::TraceWall()
         pos_err_y = 0.0;
     }
 
-    ROS_INFO_THROTTLE(1.0, "Geometry: bc(LB-LF)=%.3f, theta=%.3f rad", bc, pos_err_theta);
-    ROS_INFO_THROTTLE(1.0, "Pos errors: y=%.3f, theta=%.3f", pos_err_y, pos_err_theta);
+//    ROS_INFO_THROTTLE(1.0, "Geometry: bc(LB-LF)=%.3f, theta=%.3f rad", bc, pos_err_theta);
+//    ROS_INFO_THROTTLE(1.0, "Pos errors: y=%.3f, theta=%.3f", pos_err_y, pos_err_theta);
 
     
 
@@ -625,8 +625,8 @@ void MotionController::TraceWall()
 
 
      if (debug_loop_counter++ % 100 == 0) {  // 每1秒输出一次
-        ROS_INFO_THROTTLE(1.0, "[TraceWall] State: %d, Pos_err: y=%.3f, θ=%.3f", 
-                         sweep_action, pos_err_y, pos_err_theta);
+//        ROS_INFO_THROTTLE(1.0, "[TraceWall] State: %d, Pos_err: y=%.3f, theta=%.3f",
+//                         sweep_action, pos_err_y, pos_err_theta);
     }
 
     if (sweep_action == STRAIGHT_ON)
@@ -658,7 +658,7 @@ void MotionController::TraceWall()
                 if (dis_l_f > 0.4)
                 {
                     dis_turning_cnt++;
-                    cout << "dis_l_f = " << dis_l_f << endl;
+//                    cout << "dis_l_f = " << dis_l_f << endl;
                 }
                 else
                 {
@@ -709,8 +709,8 @@ void MotionController::TraceWall()
         // cout << "wheel_pose_state.theta = " << wheel_pose_state.theta << endl;
         // cout << "err_theta = " << err_theta << endl;
         // double err_theta = -PI_M / 2;
-        ROS_INFO("DETOUR: target=%.3f, current=%.3f, error=%.3f, cmd_z=%.3f", 
-             theta_detour, wheel_pose_state.theta, err_theta, motion_twist_cmd.angular.z);
+//        ROS_INFO("DETOUR: target=%.3f, current=%.3f, error=%.3f, cmd_z=%.3f",
+//             theta_detour, wheel_pose_state.theta, err_theta, motion_twist_cmd.angular.z);
 
         if (omega_cnt < 200)
         {
@@ -779,8 +779,8 @@ void MotionController::TraceWall()
         double err_theta = theta_detour - wheel_pose_state.theta;
         err_theta = emath.angleConstrain(err_theta);
         // cout << "角度偏差 = " << err_theta << endl;
-        ROS_INFO("TURNING: target=%.3f, current=%.3f, error=%.3f, cmd_z=%.3f", 
-             theta_detour, wheel_pose_state.theta, err_theta, motion_twist_cmd.angular.z);
+//        ROS_INFO("TURNING: target=%.3f, current=%.3f, error=%.3f, cmd_z=%.3f",
+//             theta_detour, wheel_pose_state.theta, err_theta, motion_twist_cmd.angular.z);
         if (omega_cnt < 200)
         {
             omega_cnt++;
@@ -995,10 +995,10 @@ void MotionController::FullCoverage()
             }else
             {
                 target_dist = 1.0;
-                cout << "dis_f_r = " << dis_f_r << endl;
-                cout << "dis_f_l = " << dis_f_l << endl;
-                cout << "dis_f_min = " << dis_f_min << endl;
-                cout << "target_dist = " << target_dist << endl;
+//                cout << "dis_f_r = " << dis_f_r << endl;
+//                cout << "dis_f_l = " << dis_f_l << endl;
+//                cout << "dis_f_min = " << dis_f_min << endl;
+//                cout << "target_dist = " << target_dist << endl;
 
                 // if(dis_f_l < 0.2 || dis_f_r < 0.2){
                 //     cover_action = CLIMB_WALL;
@@ -1074,14 +1074,14 @@ void MotionController::FullCoverage()
                     motion_twist_cmd.angular.z = 0.0;
                 }
                 // if(pos_err_theta != 0.0){
-                cout << "dis_l_f = " << dis_l_f << endl;
-                cout << "dis_l_b = " << dis_l_b << endl;
-                cout << "pos_err_y = " << pos_err_y << endl;
-                cout << "wheel_pose_state.theta = " << wheel_pose_state.theta << endl;
-                cout << "cover_turning_theta = " << cover_turning_theta << endl;
-                cout << "pos_err_theta = " << pos_err_theta << endl;
-                cout << "motion_twist_cmd.angular.z = " << motion_twist_cmd.angular.z << endl;
-                cout << "----------------" << endl;
+//                cout << "dis_l_f = " << dis_l_f << endl;
+//                cout << "dis_l_b = " << dis_l_b << endl;
+//                cout << "pos_err_y = " << pos_err_y << endl;
+//                cout << "wheel_pose_state.theta = " << wheel_pose_state.theta << endl;
+//                cout << "cover_turning_theta = " << cover_turning_theta << endl;
+//                cout << "pos_err_theta = " << pos_err_theta << endl;
+//                cout << "motion_twist_cmd.angular.z = " << motion_twist_cmd.angular.z << endl;
+//                cout << "----------------" << endl;
                 // }
                 pos_err_theta = wheel_pose_state.theta - cover_turning_theta;
             }
@@ -1207,12 +1207,12 @@ void MotionController::Run()
     
     // 定期输出调试信息
     if ((ros::Time::now() - last_debug_time).toSec() > 2.0) {
-        ROS_INFO_THROTTLE(2.0, "=== System Status ===");
-        ROS_INFO_THROTTLE(2.0, "Session: %d, SweepAction: %d", session, sweep_action);
-        ROS_INFO_THROTTLE(2.0, "Motor comp: L=%.3f, R=%.3f", 
-                         motor_compensation_left, motor_compensation_right);
-        ROS_INFO_THROTTLE(2.0, "Wheel pose: (%.3f, %.3f, %.3f)", 
-                         wheel_pose_state.x, wheel_pose_state.y, wheel_pose_state.theta);
+//        ROS_INFO_THROTTLE(2.0, "=== System Status ===");
+//        ROS_INFO_THROTTLE(2.0, "Session: %d, SweepAction: %d", session, sweep_action);
+//        ROS_INFO_THROTTLE(2.0, "Motor comp: L=%.3f, R=%.3f",
+//                         motor_compensation_left, motor_compensation_right);
+//        ROS_INFO_THROTTLE(2.0, "Wheel pose: (%.3f, %.3f, %.3f)",
+//                         wheel_pose_state.x, wheel_pose_state.y, wheel_pose_state.theta);
         last_debug_time = ros::Time::now();
     }
 
@@ -1352,9 +1352,9 @@ void MotionController::updateMotorCalibration()
         
         // 实时输出校准进度
         if (calibration_data.sample_count % 10 == 0) {
-            double avg_yaw_drift = calibration_data.yaw_drift_sum / calibration_data.sample_count;
-            ROS_INFO_THROTTLE(0.5, "Calibrating... %.1f/5.0s, Avg yaw drift: %.4f rad", 
-                             elapsed, avg_yaw_drift);
+//            double avg_yaw_drift = calibration_data.yaw_drift_sum / calibration_data.sample_count;
+//            ROS_INFO_THROTTLE(0.5, "Calibrating... %.1f/5.0s, Avg yaw drift: %.4f rad",
+//                             elapsed, avg_yaw_drift);
         }
     }
     
@@ -1539,10 +1539,10 @@ void MotionController::applyMotorCompensation(geometry_msgs::Twist& cmd)
         // 调试输出
         static int comp_debug = 0;
         if (comp_debug++ % 200 == 0 && fabs(v) > 0.05) {
-            ROS_INFO_THROTTLE(2.0, "Motor compensation applied: L=%.3f, R=%.3f", 
-                             motor_compensation_left, motor_compensation_right);
-            ROS_INFO_THROTTLE(2.0, "  Before: v=%.3f, w=%.3f", v, w);
-            ROS_INFO_THROTTLE(2.0, "  After:  v=%.3f, w=%.3f", cmd.linear.x, cmd.angular.z);
+//            ROS_INFO_THROTTLE(2.0, "Motor compensation applied: L=%.3f, R=%.3f",
+//                             motor_compensation_left, motor_compensation_right);
+//            ROS_INFO_THROTTLE(2.0, "  Before: v=%.3f, w=%.3f", v, w);
+//            ROS_INFO_THROTTLE(2.0, "  After:  v=%.3f, w=%.3f", cmd.linear.x, cmd.angular.z);
         }
     }
 }
@@ -1761,7 +1761,7 @@ void MotionController::RunHeadingStraight()
                     << hs_turn_target_ * 180.0 / PI_M << ',' << err << ",0,0,0," << az << ",0,"
                     << wheel_pose_state.x << ',' << wheel_pose_state.y << ',' << wheel_pose_state.theta << ",0\n";
         }
-        ROS_INFO_THROTTLE(1.0, "[hs] TURN seg%d err=%.1fdeg az=%.3f", hs_seg_idx_, err * 180.0 / PI_M, az);
+//        ROS_INFO_THROTTLE(1.0, "[hs] TURN seg%d err=%.1fdeg az=%.3f", hs_seg_idx_, err * 180.0 / PI_M, az);
         return;
     }
 
@@ -1890,8 +1890,8 @@ void MotionController::RunHeadingStraight()
         if ((++hs_log_rows % 100) == 0) hs_log_.flush();
     }
 
-    ROS_INFO_THROTTLE(1.0, "[hs] %s e=%.2fdeg u=%.3f I=%.3f driven=%.2fm t=%.1fs",
-                      in_pause ? "PAUSE" : "DRIVE", e * 180.0 / PI_M, u, hs_I_, driven, drive_elapsed);
+//    ROS_INFO_THROTTLE(1.0, "[hs] %s e=%.2fdeg u=%.3f I=%.3f driven=%.2fm t=%.1fs",
+//                      in_pause ? "PAUSE" : "DRIVE", e * 180.0 / PI_M, u, hs_I_, driven, drive_elapsed);
 }
 
 // [rect-z] 据 control_mode 生成段表: 每段 {直行距离, 相对起始航向的累计转角(rad)}。

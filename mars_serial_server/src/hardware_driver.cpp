@@ -402,14 +402,14 @@ void HardwareDriver::receiveMessage(const char data[], unsigned int len)
                     std::lock_guard<std::mutex> lock(encoder_mutex);
                     memcpy(&motor_encoder, recv_msg.payload, sizeof(MotorEncoder));
                     // ========== 新增 cout 日志 ==========
-                    static int encoder_cnt = 0;
-                    encoder_cnt++;
-                    if (encoder_cnt % 50 == 0) {
-                        cout << "[编码器] right=" << motor_encoder.right_speeder 
-                            << ", left=" << motor_encoder.left_speeder
-                            << ", flagR=" << flagdirR 
-                            << ", flagL=" << flagdirL << endl;
-                    }
+                    // static int encoder_cnt = 0;
+                    // encoder_cnt++;
+                    // if (encoder_cnt % 50 == 0) {
+                    //     cout << "[编码器] right=" << motor_encoder.right_speeder
+                    //         << ", left=" << motor_encoder.left_speeder
+                    //         << ", flagR=" << flagdirR
+                    //         << ", flagL=" << flagdirL << endl;
+                    // }
                     // ==================================
                     encoder_updated = true;
                     last_encoder_stamp_ = ros::Time::now();
@@ -500,12 +500,12 @@ void HardwareDriver::receiveImuDatas()
     imu_roll = (float)(imu_encoder.roll) / 100.0f;
     imu_pitch = (float)(imu_encoder.pitch) / 100.0f;
     imu_yaw = (float)(imu_encoder.yaw) / 100.0f;
-    static int log_cnt = 0;
-    if (log_cnt++ % 100 == 0) {
-        cout << "IMU att: roll=" << imu_roll
-            << ", pitch=" << imu_pitch
-            << ", yaw=" << imu_yaw << endl;
-    }
+    // static int log_cnt = 0;
+    // if (log_cnt++ % 100 == 0) {
+    //     cout << "IMU att: roll=" << imu_roll
+    //         << ", pitch=" << imu_pitch
+    //         << ", yaw=" << imu_yaw << endl;
+    // }
 
     // [heading-straight-pd] 发布融合航向。D-19：本机 roll/yaw 轴互换，真航向=imu_encoder.roll(=imu_roll)，
     // 不是 imu_encoder.yaw。度数原样发，控制器侧做 deg->rad + atan2 wrap。
@@ -1062,21 +1062,21 @@ void HardwareDriver::UpdateImu()
         return;  // 第一帧不产生位移
     }
 
- 
-    static int imu_count = 0;
-    static int encoder_count = 0;
-    static int last_encoder_value = 0;
 
-    imu_count++;
-    if (motor_encoder.right_speeder != last_encoder_value) {
-        encoder_count++;
-        last_encoder_value = motor_encoder.right_speeder;
-    }
+    // static int imu_count = 0;
+    // static int encoder_count = 0;
+    // static int last_encoder_value = 0;
+
+    // imu_count++;
+    // if (motor_encoder.right_speeder != last_encoder_value) {
+    //     encoder_count++;
+    //     last_encoder_value = motor_encoder.right_speeder;
+    // }
 
     // 每秒钟打印一次统计
-    if (imu_count % 100 == 0) {
-        cout << "IMU cnt: " << imu_count << ", encoder upd cnt: " << encoder_count << endl;
-    }
+    // if (imu_count % 100 == 0) {
+    //     cout << "IMU cnt: " << imu_count << ", encoder upd cnt: " << encoder_count << endl;
+    // }
 
     static bool first_check = true;
     if (first_check) {
@@ -1092,8 +1092,8 @@ void HardwareDriver::UpdateImu()
 
     // 零漂过滤
     if (imu_flag == 0)
-    {   
-        cout << "【状态】imu_flag == 0，初始化中，跳过计算" << endl;
+    {
+        // cout << "【状态】imu_flag == 0，初始化中，跳过计算" << endl;
         last_time = current_time;
         imu_flag = 1;
         return; // 第一次初始化，跳过计算
@@ -1101,32 +1101,32 @@ void HardwareDriver::UpdateImu()
 
     // ========== 关键修复：时间间隔保护 ==========
     double dt = (current_time - last_time).toSec();
-    
+
     // 防御性编程：防止ROS时间异常
     if (dt <= 0) {
         // 时间异常：小于等于0
         ROS_WARN_THROTTLE(1.0, "时间异常: dt=%.6f <= 0，使用默认值0.01s", dt);
-        cout << "【警告】dt <= 0，跳过计算" << endl;
+        // cout << "【警告】dt <= 0，跳过计算" << endl;
         dt = 0.01;
         last_time = current_time;
         return;
     }
-    
+
     if (dt > 0.2) {
         // ROS时间可能发生跳跃（如重启、时间同步等）
         ROS_ERROR("时间跳跃异常: dt=%.3fs > 0.2s，跳过本次更新", dt);
         last_time = current_time;
-        cout << "【警告】dt > 0.2，跳过计算" << endl;
+        // cout << "【警告】dt > 0.2，跳过计算" << endl;
         // 重置编码器状态，避免错误积分
         wheel_flag = 0;
         imu_flag = 0;
         return;
     }
-    
+
     if (dt > 0.1) {
         // 时间间隔较大但仍在可接受范围
         ROS_WARN_THROTTLE(5.0, "时间间隔较大: dt=%.3fs，限制为0.1s", dt);
-        
+
         dt = 0.1;
     }
 
@@ -1143,13 +1143,13 @@ void HardwareDriver::UpdateImu()
     double cur_right_econd_t0 = (double)motor_encoder.right_speeder /700.0f;
     double cur_left_econd_t0 = (double)motor_encoder.left_speeder / 700.0f;
 
- 
-    
+
+
     // 检查编码器值是否异常（防止数据解析错误）
     if (fabs(cur_right_econd) > 10000.0 || fabs(cur_left_econd) > 10000.0) {
-        std::cout << "编码器值异常: right=" << cur_right_econd 
-              << ", left=" << cur_left_econd 
-              << "，使用上次值" << std::endl;
+        // std::cout << "编码器值异常: right=" << cur_right_econd
+        //       << ", left=" << cur_left_econd
+        //       << "，使用上次值" << std::endl;
         // cur_right_econd = last_right_econd;
         // cur_left_econd = last_left_econd;
         encoder_updated = false;  // 关键：不更新
@@ -1164,8 +1164,8 @@ void HardwareDriver::UpdateImu()
         // [NEW] 平行变量基准值初始化
         last_right_econd_t0 = cur_right_econd_t0;
         last_left_econd_t0 = cur_left_econd_t0;
-        
-        cout << "【状态】wheel_flag == 0，初始化编码器，跳过计算" << endl;
+
+        // cout << "【状态】wheel_flag == 0，初始化编码器，跳过计算" << endl;
         return; // 第一次初始化编码器，跳过计算
     }
     
@@ -1283,11 +1283,11 @@ void HardwareDriver::UpdateImu()
         return;
     }
 
-    cout << "dright_econd =   " << dright_econd << endl;
-    cout << "dleft_econd =   " << dleft_econd << endl;
+    // cout << "dright_econd =   " << dright_econd << endl;
+    // cout << "dleft_econd =   " << dleft_econd << endl;
     // [NEW] 打印平行变量差值
-    cout << "dright_econd_t0 =   " << dright_econd_t0 << endl;
-    cout << "dleft_econd_t0 =   " << dleft_econd_t0 << endl;
+    // cout << "dright_econd_t0 =   " << dright_econd_t0 << endl;
+    // cout << "dleft_econd_t0 =   " << dleft_econd_t0 << endl;
 
     
     // // 检查增量是否合理
@@ -1303,9 +1303,9 @@ void HardwareDriver::UpdateImu()
     double abs_left_move = fabs(dleft_econd * wheel_circumference);
 
     if (abs_right_move > max_single_move || abs_left_move > max_single_move) {
-        cout << "单次移动过大: right=" << abs_right_move 
-            << "m, left=" << abs_left_move << "m" << endl;
-        
+        // cout << "单次移动过大: right=" << abs_right_move
+        //     << "m, left=" << abs_left_move << "m" << endl;
+
         // 压缩圈数
         double scale = max_single_move / fmax(abs_right_move, abs_left_move);
         dright_econd *= scale;
@@ -1318,14 +1318,14 @@ void HardwareDriver::UpdateImu()
     // 计算位移（米）- 原方案
     base_dist_x = (dright_econd + dleft_econd) / 2.0 * wheel_circumference;
     // ========== 新增 cout 日志 ==========
-    static int imu_cnt = 0;
-    imu_cnt++;
-    if (imu_cnt % 20 == 0) {
-        cout << "[IMU] dr=" << dright_econd 
-            << ", dl=" << dleft_econd
-            << ", dist=" << base_dist_x 
-            << ", pose_x=" << base_pose.x << endl;
-    }
+    // static int imu_cnt = 0;
+    // imu_cnt++;
+    // if (imu_cnt % 20 == 0) {
+    //     cout << "[IMU] dr=" << dright_econd
+    //         << ", dl=" << dleft_econd
+    //         << ", dist=" << base_dist_x
+    //         << ", pose_x=" << base_pose.x << endl;
+    // }
     // [NEW] 平行方案1：600脉冲 + 原周长
     double base_dist_x_t0 = (dright_econd_t0 + dleft_econd_t0) / 2.0 * wheel_circumference;
     
@@ -1335,8 +1335,8 @@ void HardwareDriver::UpdateImu()
 
     // 检查base_dist_x是否合理
     if (fabs(base_dist_x) > max_single_move) {
-        std::cout << "base_dist_x异常: " << base_dist_x << "m > " << max_single_move 
-              << "m，跳过本次位置更新" << std::endl;
+        // std::cout << "base_dist_x异常: " << base_dist_x << "m > " << max_single_move
+        //       << "m，跳过本次位置更新" << std::endl;
         base_dist_x = (base_dist_x > 0) ? max_single_move : -max_single_move;
         // [NEW] 平行变量同步修正
         base_dist_x_t0 = (base_dist_x_t0 > 0) ? max_single_move : -max_single_move;
@@ -1363,16 +1363,16 @@ void HardwareDriver::UpdateImu()
     imu_datas.linear_acceleration.y = -9.81;
     imu_datas.linear_acceleration.z = imu_ax + 0.2;
 
-    cout << "=== 位置更新 ===" << endl;
-    cout << "base_dist_x = " << base_dist_x << endl;
+    // cout << "=== 位置更新 ===" << endl;
+    // cout << "base_dist_x = " << base_dist_x << endl;
     // [NEW] 打印平行变量位移
-    cout << "base_dist_x_t0(600脉冲) = " << base_dist_x_t0 << endl;
-    cout << "base_dist_x_t1(周长0.82) = " << base_dist_x_t1 << endl;
-    cout << "当前角度 = " << base_pose.theta * 180.0/M_PI << "°" << endl;
+    // cout << "base_dist_x_t0(600脉冲) = " << base_dist_x_t0 << endl;
+    // cout << "base_dist_x_t1(周长0.82) = " << base_dist_x_t1 << endl;
+    // cout << "当前角度 = " << base_pose.theta * 180.0/M_PI << "°" << endl;
 
     double original_x = base_pose.x;
     double original_y = base_pose.y;
-    cout << "原始位置: X=" << original_x << ", Y=" << original_y << endl;
+    // cout << "原始位置: X=" << original_x << ", Y=" << original_y << endl;
 
     // 保存当前角度
     double current_theta = base_pose.theta;
@@ -1443,56 +1443,56 @@ void HardwareDriver::UpdateImu()
     // ============================================
 
     // 调试输出
-    cout << "位移: ΔX=" << delta_x << ", ΔY=" << delta_y << endl;
+    // cout << "位移: ΔX=" << delta_x << ", ΔY=" << delta_y << endl;
     if (skip_position_update) {
-        cout << "⚠️ 跳过位置更新" << endl;
+        // cout << "⚠️ 跳过位置更新" << endl;
     }
     if (reset_odometry) {
-        cout << "⚠️ 里程计已重置" << endl;
+        // cout << "⚠️ 里程计已重置" << endl;
     }
-    cout << "新位置: X=" << std::fixed << std::setprecision(6) << base_pose.x 
-         << ", Y=" << base_pose.y << endl;
-    cout << "新角度: " << base_pose.theta * 180.0/M_PI << "°" << endl;
-    cout << "新弧度: " << base_pose.theta << endl;
+    // cout << "新位置: X=" << std::fixed << std::setprecision(6) << base_pose.x
+    //      << ", Y=" << base_pose.y << endl;
+    // cout << "新角度: " << base_pose.theta * 180.0/M_PI << "°" << endl;
+    // cout << "新弧度: " << base_pose.theta << endl;
 
     // [NEW] 累积统计和对比输出
-    static double sum_original = 0.0;   // 原方案累积
-    static double sum_t0 = 0.0;         // 600脉冲累积
-    static double sum_t1 = 0.0;         // 周长0.82累积
-    static int test_frame = 0;
-    
-    sum_original += fabs(base_dist_x);
-    sum_t0 += fabs(base_dist_x_t0);
-    sum_t1 += fabs(base_dist_x_t1);
-    test_frame++;
-    
+    // static double sum_original = 0.0;   // 原方案累积
+    // static double sum_t0 = 0.0;         // 600脉冲累积
+    // static double sum_t1 = 0.0;         // 周长0.82累积
+    // static int test_frame = 0;
+
+    // sum_original += fabs(base_dist_x);
+    // sum_t0 += fabs(base_dist_x_t0);
+    // sum_t1 += fabs(base_dist_x_t1);
+    // test_frame++;
+
     // 每100帧打印对比（约2秒）
-    if (test_frame % 100 == 0) {
-        cout << "===== 平行对比 =====" << endl;
-        cout << "[原方案] 720脉冲+原周长: " << sum_original << " 米" << endl;
-        cout << "[猜测A] 600脉冲+原周长: " << sum_t0 << " 米" << endl;
-        cout << "[猜测B] 720脉冲+周长0.82: " << sum_t1 << " 米" << endl;
-        cout << "当前 base_pose.x = " << base_pose.x << " 米" << endl;
-        cout << "==================" << endl;
-    }
-    
+    // if (test_frame % 100 == 0) {
+    //     cout << "===== 平行对比 =====" << endl;
+    //     cout << "[原方案] 720脉冲+原周长: " << sum_original << " 米" << endl;
+    //     cout << "[猜测A] 600脉冲+原周长: " << sum_t0 << " 米" << endl;
+    //     cout << "[猜测B] 720脉冲+周长0.82: " << sum_t1 << " 米" << endl;
+    //     cout << "当前 base_pose.x = " << base_pose.x << " 米" << endl;
+    //     cout << "==================" << endl;
+    // }
+
     // 检测运动停止，打印最终结果
-    static double last_x_test = 0;
-    static int stop_test_cnt = 0;
-    if (fabs(base_dist_x) < 0.001) {
-        stop_test_cnt++;
-        if (stop_test_cnt > 50 && fabs(base_pose.x - last_x_test) < 0.01) {
-            cout << "########## 最终验证结果 ##########" << endl;
-            cout << "[原方案] 累积位移 = " << sum_original << " 米" << endl;
-            cout << "[猜测A] 600脉冲累积 = " << sum_t0 << " 米" << endl;
-            cout << "[猜测B] 周长0.82累积 = " << sum_t1 << " 米" << endl;
-            cout << "当前 base_pose.x = " << base_pose.x << " 米" << endl;
-            cout << "################################" << endl;
-        }
-    } else {
-        stop_test_cnt = 0;
-        last_x_test = base_pose.x;
-    }
+    // static double last_x_test = 0;
+    // static int stop_test_cnt = 0;
+    // if (fabs(base_dist_x) < 0.001) {
+    //     stop_test_cnt++;
+    //     if (stop_test_cnt > 50 && fabs(base_pose.x - last_x_test) < 0.01) {
+    //         cout << "########## 最终验证结果 ##########" << endl;
+    //         cout << "[原方案] 累积位移 = " << sum_original << " 米" << endl;
+    //         cout << "[猜测A] 600脉冲累积 = " << sum_t0 << " 米" << endl;
+    //         cout << "[猜测B] 周长0.82累积 = " << sum_t1 << " 米" << endl;
+    //         cout << "当前 base_pose.x = " << base_pose.x << " 米" << endl;
+    //         cout << "################################" << endl;
+    //     }
+    // } else {
+    //     stop_test_cnt = 0;
+    //     last_x_test = base_pose.x;
+    // }
 
     imu_datas.orientation_covariance = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     imu_datas.angular_velocity_covariance = {0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -1500,24 +1500,24 @@ void HardwareDriver::UpdateImu()
     imu_data_pub_.publish(imu_datas);
 
     // cout << "dt " << dt << endl;
-    cout << "base_pose.x  " << base_pose.x << endl;
-    cout << "dist_datas " << dist_datas.data[0] <<  " " << dist_datas.data[1] << " " << dist_datas.data[2] << " " <<dist_datas.data[3] << endl;
+    // cout << "base_pose.x  " << base_pose.x << endl;
+    // cout << "dist_datas " << dist_datas.data[0] <<  " " << dist_datas.data[1] << " " << dist_datas.data[2] << " " <<dist_datas.data[3] << endl;
     // // // // cout << "base_pose.y  " << base_pose.y << endl;
-    cout << "base_pose.theta  " << base_pose.theta * 180.0/M_PI << endl;
-    cout << "base_pose.theta  rd" << base_pose.theta << endl;
-    cout << "-------------------------------\n" << endl;
+    // cout << "base_pose.theta  " << base_pose.theta * 180.0/M_PI << endl;
+    // cout << "base_pose.theta  rd" << base_pose.theta << endl;
+    // cout << "-------------------------------\n" << endl;
 
-    static int debug_count = 0;
-    if (debug_count++ % 50 == 0) {
-        cout << "=== 坐标系方向测试 ===" << endl;
-        cout << "机器人实际向前走时：" << endl;
-        cout << "base_pose.x（应该增加）: " << base_pose.x << endl;
-        cout << "base_pose.y（应该接近0）: " << base_pose.y << endl;
-        cout << "base_pose.theta（方向角）: " << base_pose.theta*180/M_PI << "°" << endl;
-        
-        // 建议：向前走时，base_pose.x应该增加，base_pose.y接近0
-        // 如果base_pose.y在增加，说明X/Y轴定义反了
-    }
+    // static int debug_count = 0;
+    // if (debug_count++ % 50 == 0) {
+    //     cout << "=== 坐标系方向测试 ===" << endl;
+    //     cout << "机器人实际向前走时：" << endl;
+    //     cout << "base_pose.x（应该增加）: " << base_pose.x << endl;
+    //     cout << "base_pose.y（应该接近0）: " << base_pose.y << endl;
+    //     cout << "base_pose.theta（方向角）: " << base_pose.theta*180/M_PI << "°" << endl;
+    //
+    //     // 建议：向前走时，base_pose.x应该增加，base_pose.y接近0
+    //     // 如果base_pose.y在增加，说明X/Y轴定义反了
+    // }
 
  
  
