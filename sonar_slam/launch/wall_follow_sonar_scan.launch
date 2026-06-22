@@ -36,7 +36,7 @@
   <arg name="enable_stitch"     default="true"/>          <!-- true=采集全部停点完成后自动离线拼图(出 <session>/stitching.pcd); false=只采集不拼(行为同接入前)。拼图需机上装 open3d/scipy/pandas -->
 
   <!-- ===== 沿边整定参数 (move_controller 读全局命名空间; 填 step1-3 调好的值, 默认=代码现场默认) ===== -->
-  <arg name="wall_align"        default="3.0"/>           <!-- 目标离墙距离(米) [step1 核心] -->
+  <arg name="wall_align"        default="2.0"/>           <!-- 目标离墙距离(米) [step1 核心]; 默认2.0(据实际实验取2m) -->
   <arg name="wall_k_dist"       default="0.20"/>          <!-- 距墙距离环增益 [step1] -->
   <arg name="wall_k_par"        default="0.60"/>          <!-- 平行(姿态)环增益 [step1] -->
   <arg name="wall_off_max"      default="0.10"/>          <!-- 距/平行环折算航向偏置上限(rad) [step1] -->

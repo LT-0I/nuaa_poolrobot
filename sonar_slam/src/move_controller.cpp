@@ -22,7 +22,7 @@ MoveController::MoveController() :
     config_speed_(0.25f),
     config_pump_speed_(0.0f),           
     user_config_pump_speed_(0.0f),      
-    config_wall_align_(3.0f),
+    config_wall_align_(2.0f),
     config_wall_stale_sec_(0.5f),
     ultra_right_seq_(0),
     last_ultra_raw_rf_(-1),
@@ -90,10 +90,10 @@ MoveController::MoveController() :
     if (temp_pump < 0.0f) temp_pump = 0.0f;
     if (temp_pump > 1.0f) temp_pump = 1.0f;
     user_config_pump_speed_ = temp_pump;
-    // 目标距右墙距离(m)，沿墙距离环用。3.0=阶段目标(距壁3m循迹)。
-    // ⚠头号下水未知: 右前/右后超声在 3m 掠射平直池壁能否拿到稳定回波(掠射存亡); 拿不到→串级退化纯IMU守航向(直行,
-    //   距墙环失效)。下水前先静态实测(距右墙3.0m平行静止读 data[2]/[3] 是否稳定有效); 拿不到则降到掠射可见最大距离(如2.0~2.5)。
-    nh_.param("wall_align", config_wall_align_, 3.0f);
+    // 目标距右墙距离(m)，沿墙距离环用。默认2.0(据实际实验取2m); 同时驱动拐角触发距离与找墙正前净空门。
+    // ⚠头号下水未知: 右前/右后超声在掠射平直池壁能否拿到稳定回波(掠射存亡); 拿不到→串级退化纯IMU守航向(直行,
+    //   距墙环失效)。下水前先静态实测(距右墙2.0m平行静止读 data[2]/[3] 是否稳定有效); 拿不到则降到掠射可见最大距离(如1.5)。
+    nh_.param("wall_align", config_wall_align_, 2.0f);
     // 右侧超声陈旧看门狗(s)：默认0.5(超声实测 MCU 推流 ~10Hz=0.1s/路、≈5×周期)；夹在[0.3,5.0]防误设。
     // 实测(2026-06-14 g2a_map CSV)四路各 ~10Hz, 比旧推断的 0.83Hz 快得多→可比旧 1.5s 收紧, 丢回波盲走更短。
     // ⚠ 须≥右侧实际刷新周期：若 MCU 推流率下降或驱动异常导致刷新变慢, 须同步上调本值, 否则超声环↔odom兜底抖动。
@@ -173,7 +173,7 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-findwall-frontclear-fix-20260621 (corner trigger follows wall_align; findwall front-clear uses SAME trig as corner so acquire hands off without spurious turn; per-run log to $HOME/sonar_logs/move_logs)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-findwall-frontclear-fix-wa2m-20260622 (wall_align default 2.0m; corner trigger follows wall_align; findwall front-clear uses SAME trig as corner so acquire hands off without spurious turn; per-run log to $HOME/sonar_logs/move_logs)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
