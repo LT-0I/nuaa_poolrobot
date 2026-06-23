@@ -8,14 +8,16 @@
  *   - 扫描期间连续记录 odom 流(/wheel_odom);
  *   - 按原版逻辑驱动 Ping360 声呐(逐角发 0x0A29 命令, 解析 2300 帧), 扫【整一圈 360deg=400 角】后即停
  *     (手控由操作员控运动, 不再给声呐计时; 量程 range_level 为唯一常调参数);
- *   - 给声呐方的交付三件套(照原版终端4 格式/命名/目录): ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml};
+ *   - 给声呐方的交付三件套(照原版终端4 格式/命名; 目录并入本次任务夹·会话隔离防覆盖):
+ *     ~/sonar_logs/manual_collect/task_<时间戳>/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml};
  *   - 我方诊断附加(留 point 夹): cloud.pcd(ASCII 副本) + sonar_raw/summary CSV + odom_stream + meta。
  *
- * 数据层次:
- *   交付(声呐方): ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd,pgm,yaml}  (照原版终端4)
- *   附加(我方):   ~/sonar_logs/manual_collect/task_<时间戳>/point_NN/{odom_stream.csv,
- *                 sonar_raw.csv, sonar_summary.csv, cloud.pcd(ASCII), meta.txt}
+ * 数据层次(全部并入每次任务夹 ~/sonar_logs/manual_collect/task_<时间戳>/, 一次任务=一自洽夹):
+ *   交付(声呐方): task_<时间戳>/maps/phase_multi_submap_N_posN.{pcd,pgm,yaml}  (照原版终端4 命名/格式)
+ *   附加(我方):   task_<时间戳>/point_NN/{odom_stream.csv, sonar_raw.csv,
+ *                 sonar_summary.csv, cloud.pcd(ASCII), meta.txt} + task 级 odom_full.csv / points_index.csv
  *   - task 夹: 每次启动本节点一个; point 夹: 每次 /point_collect/record 一个。
+ *   - 交付目录并入任务夹后跨任务不再共享 ~/sonar_logs/maps/(免操作员手动备份, 防 pos 同号互覆)。
  *
  * 边界:
  *   - 本节点【不】发 /cmd_vel、不碰电机/水泵; 运动与泵由操作员的 teleop 负责。
@@ -65,7 +67,7 @@ const size_t RX_BUFFER_SIZE = 40960;
 const uint16_t MAX_RAW_POINTS = 1200;
 }
 
-#define COLLECTOR_VERSION "manual-collect-fullodom-assoc-20260622"
+#define COLLECTOR_VERSION "manual-collect-fullodom-assoc-taskmaps-20260622"
 
 // ======================== 声呐 2300 消息结构(与硬件协议一致, 移植自 mapper 头) ========================
 #pragma pack(push, 1)
@@ -824,7 +826,7 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
     // 构建点云(90 度旋转 + 量程过滤), 供三件套与本地副本共用
     pcl::PointCloud<pcl::PointXYZI> cloud = buildCloud(snap, angle_base);
 
-    // ==== 给声呐方的交付三件套: 照原版终端4 -> ~/sonar_logs/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml} ====
+    // ==== 给声呐方的交付三件套: 照原版终端4 命名/格式 -> <task>/maps/phase_multi_submap_N_posN.{pcd(二进制)+pgm+yaml} ====
     const std::string deliverable_base = "phase_multi_submap_" + std::to_string(point_counter_)
                                        + "_pos" + std::to_string(point_counter_);
     bool deliverable_written = false;
@@ -1010,12 +1012,13 @@ void ManualPointCollector::writeBinaryPcd(const std::string& path, const pcl::Po
     pf.close();
 }
 
-// ======================== ~/sonar_logs/maps/ (与原版终端4 同一交付目录) ========================
+// ======================== <task>/maps/ (交付三件套目录: 并入本次任务夹, 会话隔离防覆盖) ========================
+// 文件名/格式仍照原版终端4(phase_multi_submap_N_posN.{pcd,pgm,yaml}); 仅父目录从共享
+// ~/sonar_logs/maps/ 改为每次任务自己的 task_<时间戳>/maps/, 免操作员手动备份、防跨任务 pos 同号互覆。
+// yaml 内嵌的 pointcloud: 绝对路径由本函数返回值经 saveMapAsYAML 派生, 自动跟随到本任务 maps/。
 std::string ManualPointCollector::mapsDir() {
-    std::string home = getenv("HOME") ? getenv("HOME") : ".";
-    std::string base = home + "/sonar_logs/";
-    std::string md   = base + "maps/";
-    ensureDir(base);
+    if (!task_dir_ok_) { ROS_WARN("task dir not ready -> maps dir unavailable, deliverable skipped"); return std::string(); }
+    std::string md = task_dir_ + "maps/";   // task_dir_ 以 '/' 结尾(见构造)
     if (!ensureDir(md)) { ROS_WARN("cannot create maps dir: %s", md.c_str()); return std::string(); }
     return md;
 }
@@ -1186,8 +1189,8 @@ void ManualPointCollector::writeMeta(const std::string& dir, const ros::Time& t_
       << "angles_with_echo=" << angles_with_echo << " of 400 (distinct angles with a non-empty return, not frame count)\n"
       << "angle_timeout_sec=" << angle_timeout_sec_ << "\n"
       << "scan_timeout_sec=" << scan_timeout_sec_ << " (safety ceiling only, not a timer)\n"
-      << "deliverable=~/sonar_logs/maps/phase_multi_submap_" << point_counter_ << "_pos" << point_counter_
-      << ".{pcd(binary)+pgm+yaml} (faithful to terminal-4 format/naming)\n"
+      << "deliverable=../maps/phase_multi_submap_" << point_counter_ << "_pos" << point_counter_
+      << ".{pcd(binary)+pgm+yaml} (in this task's maps/; faithful to terminal-4 format/naming)\n"
       << "local_extra=cloud.pcd in this dir is an ASCII copy (CloudCompare-openable; verifies the binary)\n"
       << "scan_elapsed_s=" << (t_end - t_start).toSec() << "\n"
       << "start_wall=" << sbuf << " (" << std::setprecision(6) << t_start.toSec() << ")\n"
