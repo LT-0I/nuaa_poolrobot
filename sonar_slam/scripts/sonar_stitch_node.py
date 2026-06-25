@@ -32,6 +32,26 @@ class SonarStitchNode(object):
         self.publish_cloud = rospy.get_param("~publish_cloud", True)
         self.frame_id = rospy.get_param("~frame_id", "map")
 
+        # 逐帧滤波参数(对齐 lvbo): 默认用 sonar_stitch 模块常量(MIN_INNER=90 等);
+        # 仅当显式给了 ~stitch_* 私有参数才覆盖, 现场不改脚本即可调滤波, 拼接算法本身不动。
+        self._filter_param_map = (
+            ("MIN_DIST", "~stitch_min_dist", float),
+            ("MAX_DIST", "~stitch_max_dist", float),
+            ("MIN_INNER", "~stitch_min_inner", float),
+            ("MIN_OUTER", "~stitch_min_outer", float),
+            ("MAX_LIMIT", "~stitch_max_limit", float),
+            ("ARC_EPS", "~stitch_arc_eps", float),
+            ("ARC_MIN_POINTS", "~stitch_arc_min_points", int),
+            ("ARC_MAX_RADIUS_STD", "~stitch_arc_max_radius_std", float),
+        )
+        self._filter_overrides = {}
+        for attr, pname, cast in self._filter_param_map:
+            if rospy.has_param(pname):
+                try:
+                    self._filter_overrides[attr] = cast(rospy.get_param(pname))
+                except (TypeError, ValueError):
+                    rospy.logwarn("[sonar_stitch_node] bad %s, ignore override", pname)
+
         self._lock = threading.Lock()
         self._busy = False
         self._processed = set()
@@ -78,6 +98,13 @@ class SonarStitchNode(object):
                 rospy.logerr("[sonar_stitch_node] install on this machine: "
                              "pip3 install open3d scipy pandas numpy")
                 return
+
+            # 把现场给的 ~stitch_* 覆盖写进 sonar_stitch 模块常量(逐帧滤波/main() 运行期读这些全局)。
+            for attr, val in self._filter_overrides.items():
+                old = getattr(sonar_stitch, attr, None)
+                setattr(sonar_stitch, attr, val)
+                rospy.loginfo("[sonar_stitch_node] filter override %s: %s -> %s",
+                              attr, str(old), str(val))
 
             resolved = sonar_stitch._resolve_paths(session_dir)
             out_pcd = sonar_stitch.OUTPUT_PCD

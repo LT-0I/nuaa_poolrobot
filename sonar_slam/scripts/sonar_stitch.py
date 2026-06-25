@@ -16,8 +16,9 @@ sonar_stitch.py - 声呐子图离线拼接 (ICP)
 输出: <session_dir>/stitching.pcd
 """
 
-# 版本横幅(grep 自判): 改本脚本行为必改此串。verbatim = 拼接算法照搬未改, 仅参数化路径。
-STITCH_VERSION = "sonar-stitch-pinjie-verbatim-20260622"
+# 版本横幅(grep 自判): 改本脚本行为必改此串。拼接算法(ICP/合并)照搬未改;
+# 逐帧滤波 MIN_INNER 对齐 lvbo=90(原60), 八个滤波参数可经 sonar_stitch_node 的 ROS 私有参数(~stitch_*)覆盖。
+STITCH_VERSION = "sonar-stitch-lvbofilter-mininner90-param-20260625"
 
 import open3d as o3d
 import numpy as np
@@ -61,10 +62,11 @@ def find_latest_session(root=None):
                    if d.startswith("scan_") and os.path.isdir(os.path.join(root, d)))
     return os.path.join(root, cands[-1]) if cands else None
 
-# --- 滤波参数 ---
+# --- 滤波参数 (逐帧, 拼接前对每帧 maps/*.pcd 跑; 与离线 lvbo 滤波一致) ---
+# 全部为模块级常量, 可经 sonar_stitch_node 读 ROS 私有参数 ~stitch_* 覆盖, 不必改本脚本。
 MIN_DIST = 1.2
 MAX_DIST = 12.0
-MIN_INNER = 60.0
+MIN_INNER = 90.0          # 内圈(<=MAX_DIST)强度下限; 对齐 lvbo=90(原 60, 偏松易漏鬼影); 可经 ~stitch_min_inner 覆盖
 MIN_OUTER = 120.0
 MAX_LIMIT = 200.0
 ARC_EPS = 0.3

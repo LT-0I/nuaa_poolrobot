@@ -34,6 +34,7 @@
 
   <!-- ===== 拼图开关 ===== -->
   <arg name="enable_stitch"     default="true"/>          <!-- true=采集全部停点完成后自动离线拼图(出 <session>/stitching.pcd); false=只采集不拼(行为同接入前)。拼图需机上装 open3d/scipy/pandas -->
+  <arg name="stitch_min_inner"  default="90"/>            <!-- 逐帧滤波内圈(<=12m)强度门; 对齐 lvbo=90(原60偏松易漏同心圆鬼影)。其余7个滤波参数可同法用 ~stitch_* 私有参数覆盖, 见 sonar_stitch_node。 -->
 
   <!-- ===== 沿边整定参数 (move_controller 读全局命名空间; 填 step1-3 调好的值, 默认=代码现场默认) ===== -->
   <arg name="wall_align"        default="2.0"/>           <!-- 目标离墙距离(米) [step1 核心]; 默认2.0(据实际实验取2m) -->
@@ -77,6 +78,8 @@
        -> 出 <session>/stitching.pcd -> 发 /sonar_stitch/cloud(RViz) /sonar_stitch/done。
        需机上装 open3d/scipy/pandas/numpy; 缺依赖会打 ASCII 提示并跳过, 不影响采集。 -->
   <node if="$(arg enable_stitch)" pkg="sonar_slam" type="sonar_stitch_node.py"
-        name="sonar_stitch_node" output="screen"/>
+        name="sonar_stitch_node" output="screen">
+    <param name="stitch_min_inner" value="$(arg stitch_min_inner)"/>   <!-- 私有 ~stitch_min_inner: 覆盖逐帧滤波内圈强度门; 缺省即脚本默认90 -->
+  </node>
 
 </launch>
