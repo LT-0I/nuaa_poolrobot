@@ -13,12 +13,15 @@ sonar_stitch.py - 声呐子图离线拼接 (ICP)
   python3 sonar_stitch.py <session_dir>   # 拼指定会话目录(<session>/maps + <session>/sonar_odom_log.csv)
   python3 sonar_stitch.py --latest        # 自动拼 ~/sonar_logs/ 下时间戳最新的 scan_* 会话
   (不带参数 = 退回原脚本的默认相对路径行为)
-输出: <session_dir>/stitching.pcd
+输出: standalone 跑 -> <session_dir>/stitching.pcd; 经 sonar_stitch_node 编排时 -> 两张图
+      stitching_loc.pcd(MIN_INNER=60 稠密定位) + stitching_view.pcd(MIN_INNER=90 干净显示)
 """
 
-# 版本横幅(grep 自判): 改本脚本行为必改此串。拼接算法(ICP/合并)照搬未改;
-# 逐帧滤波 MIN_INNER 对齐 lvbo=90(原60), 八个滤波参数可经 sonar_stitch_node 的 ROS 私有参数(~stitch_*)覆盖。
-STITCH_VERSION = "sonar-stitch-lvbofilter-mininner90-param-20260625"
+# 版本横幅(grep 自判): 改本脚本行为必改此串。拼接算法(section 1-8 + main())逐字搬自 pinjie-auto1.py 未动;
+# 本轮仅改 section 0 参数: MAX_CORRECTION_TRANS 0.80->1.5(放宽 ICP 接受门, 容忍停点间大 odom 漂移的修正)。
+# 模块默认 MIN_INNER=90(view 档); 双图(loc=60 稠密定位图 / view=90 干净显示图)由 sonar_stitch_node 编排同一
+# main() 跑两遍, 其余 7 个通用滤波参数可经 ~stitch_* 覆盖, MIN_INNER 两档经 ~stitch_min_inner_loc / ~stitch_min_inner_view。
+STITCH_VERSION = "sonar-stitch-maxcorr1p5-param-20260626"
 
 import open3d as o3d
 import numpy as np
@@ -66,7 +69,7 @@ def find_latest_session(root=None):
 # 全部为模块级常量, 可经 sonar_stitch_node 读 ROS 私有参数 ~stitch_* 覆盖, 不必改本脚本。
 MIN_DIST = 1.2
 MAX_DIST = 12.0
-MIN_INNER = 90.0          # 内圈(<=MAX_DIST)强度下限; 对齐 lvbo=90(原 60, 偏松易漏鬼影); 可经 ~stitch_min_inner 覆盖
+MIN_INNER = 90.0          # 内圈(<=MAX_DIST)强度下限; 模块默认=lvbo/view 档90; node 跑两遍时按档覆盖(loc=60稠密 / view=90干净), 经 ~stitch_min_inner_loc / ~stitch_min_inner_view
 MIN_OUTER = 120.0
 MAX_LIMIT = 200.0
 ARC_EPS = 0.3
@@ -89,7 +92,7 @@ LOCAL_MAP_MARGIN = 2.0  # 局部地图裁剪范围扩展距离 (m)
 # ICP 质量门限
 MIN_ICP_FITNESS = 0.12
 MAX_ICP_RMSE = 0.35
-MAX_CORRECTION_TRANS = 0.80  # 单次 ICP 允许修正的最大平移 (m)
+MAX_CORRECTION_TRANS = 1.5  # 单次 ICP 允许修正的最大平移 (m); 0.80->1.5(放宽接受门, 容忍停点间大 odom 漂移的 ICP 修正)
 MAX_CORRECTION_YAW_DEG = 8.0  # 单次 ICP 允许修正的最大角度 (deg)
 
 FORCE_ODOM_ONLY_IDS = set()

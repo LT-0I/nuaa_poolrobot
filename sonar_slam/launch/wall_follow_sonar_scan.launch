@@ -33,8 +33,9 @@
   <arg name="acquire_distance"  default="0.5"/>           <!-- acquire_wall_first=true 时, 找墙对齐后先沿边的距离(米) -->
 
   <!-- ===== 拼图开关 ===== -->
-  <arg name="enable_stitch"     default="true"/>          <!-- true=采集全部停点完成后自动离线拼图(出 <session>/stitching.pcd); false=只采集不拼(行为同接入前)。拼图需机上装 open3d/scipy/pandas -->
-  <arg name="stitch_min_inner"  default="90"/>            <!-- 逐帧滤波内圈(<=12m)强度门; 对齐 lvbo=90(原60偏松易漏同心圆鬼影)。其余7个滤波参数可同法用 ~stitch_* 私有参数覆盖, 见 sonar_stitch_node。 -->
+  <arg name="enable_stitch"     default="true"/>          <!-- true=采集全部停点完成后自动离线拼图【两遍, 出两张图】: <session>/stitching_loc.pcd(定位) + stitching_view.pcd(显示); false=只采集不拼。拼图需机上装 open3d/scipy/pandas -->
+  <arg name="stitch_min_inner_loc"  default="60"/>        <!-- 定位图(loc, 稠密)逐帧滤波内圈(<=12m)强度门; 低=点多, 供 g 单点声呐定位 ICP -->
+  <arg name="stitch_min_inner_view" default="90"/>        <!-- 显示图(view, 干净)逐帧滤波内圈强度门; 高=去同心圆鬼影, 供 g rviz 显示底图。其余7个滤波参数两图通用, 可用 ~stitch_* 私有参数覆盖, 见 sonar_stitch_node。 -->
 
   <!-- ===== 沿边整定参数 (move_controller 读全局命名空间; 填 step1-3 调好的值, 默认=代码现场默认) ===== -->
   <arg name="wall_align"        default="2.0"/>           <!-- 目标离墙距离(米) [step1 核心]; 默认2.0(据实际实验取2m) -->
@@ -74,12 +75,14 @@
     <param name="enable_stitch"           value="$(arg enable_stitch)"/>   <!-- 私有 ~enable_stitch: 采集完成是否发 /sonar_scan/session_done -->
   </node>
 
-  <!-- 拼图节点(离线后处理, 受 enable_stitch 门控): 订阅 /sonar_scan/session_done -> 对会话目录跑 sonar_stitch.py
-       -> 出 <session>/stitching.pcd -> 发 /sonar_stitch/cloud(RViz) /sonar_stitch/done。
+  <!-- 拼图节点(离线后处理, 受 enable_stitch 门控): 订阅 /sonar_scan/session_done -> 对会话目录跑 sonar_stitch.py 两遍
+       -> 出 <session>/stitching_loc.pcd(MIN_INNER=60 定位) + stitching_view.pcd(MIN_INNER=90 显示)
+       -> 发 /sonar_stitch/cloud(RViz, =view 干净图) /sonar_stitch/done。
        需机上装 open3d/scipy/pandas/numpy; 缺依赖会打 ASCII 提示并跳过, 不影响采集。 -->
   <node if="$(arg enable_stitch)" pkg="sonar_slam" type="sonar_stitch_node.py"
         name="sonar_stitch_node" output="screen">
-    <param name="stitch_min_inner" value="$(arg stitch_min_inner)"/>   <!-- 私有 ~stitch_min_inner: 覆盖逐帧滤波内圈强度门; 缺省即脚本默认90 -->
+    <param name="stitch_min_inner_loc"  value="$(arg stitch_min_inner_loc)"/>   <!-- 私有 ~stitch_min_inner_loc: 定位图逐帧滤波内圈强度门; 缺省60 -->
+    <param name="stitch_min_inner_view" value="$(arg stitch_min_inner_view)"/>  <!-- 私有 ~stitch_min_inner_view: 显示图逐帧滤波内圈强度门; 缺省90 -->
   </node>
 
 </launch>
