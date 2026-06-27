@@ -142,6 +142,9 @@ MoveController::MoveController() :
     nh_.param("corner_turn_timeout",    config_corner_turn_timeout_,    8.0f);
     nh_.param("corner_turn_cap_deg",    config_corner_turn_cap_deg_,    130.0f);
     nh_.param("wall_consistency_m",     config_wall_consistency_m_,     0.5f);
+    // 加固(0627): 拐角防"分段调用开局误拐"—— 最小前进门 + 贴近真墙安全豁免(参数化; corner_min_advance_m=0 复现加固前行为, A/B用)
+    nh_.param("corner_min_advance_m", config_corner_min_advance_m_, 0.30f);
+    nh_.param("corner_front_floor_m", config_corner_front_floor_m_, 0.80f);
     // 夹限防误设
     if (config_corner_front_confirm_   < 1)     config_corner_front_confirm_   = 1;
     if (config_corner_front_trigger_m_ < 0.4f)  config_corner_front_trigger_m_ = 0.4f;
@@ -156,6 +159,10 @@ MoveController::MoveController() :
     if (config_corner_turn_omega_fine_ > config_corner_turn_omega_) config_corner_turn_omega_fine_ = config_corner_turn_omega_;
     if (config_corner_turn_timeout_    < 1.0f)  config_corner_turn_timeout_    = 1.0f;
     if (config_wall_consistency_m_     < 0.05f) config_wall_consistency_m_     = 0.05f;
+    if (config_corner_min_advance_m_   < 0.0f) config_corner_min_advance_m_   = 0.0f;
+    if (config_corner_min_advance_m_   > 5.0f) config_corner_min_advance_m_   = 5.0f;
+    if (config_corner_front_floor_m_   < 0.0f) config_corner_front_floor_m_   = 0.0f;
+    if (config_corner_front_floor_m_   > 1.5f) config_corner_front_floor_m_   = 1.5f;
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 启动前 rosparam set /xxx) =====
     nh_.param("findwall_omega",       config_findwall_omega_,       0.18f);
@@ -173,7 +180,7 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-findwall-frontclear-fix-wa2m-20260622 (wall_align default 2.0m; corner trigger follows wall_align; findwall front-clear uses SAME trig as corner so acquire hands off without spurious turn; per-run log to $HOME/sonar_logs/move_logs)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-cornerguard-minadv-floor-20260627 (off wa2m-20260622; ADDS corner anti-false-trigger: min-advance gate + near-wall floor bypass; set corner_min_advance_m=0 to reproduce pre-guard behavior for A/B; per-run log to $HOME/sonar_logs/move_logs)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -182,6 +189,17 @@ MoveController::MoveController() :
              (int)config_enable_corner_, config_corner_front_trigger_m_, config_corner_front_confirm_, config_corner_settle_sec_,
              config_corner_turn_deg_, config_corner_turn_omega_, config_corner_turn_omega_fine_, config_corner_slow_deg_,
              config_corner_turn_cap_deg_, config_corner_turn_timeout_);
+    ROS_INFO("  corner guard(0627): min_advance=%.2fm near_wall_floor=%.2fm [set corner_min_advance_m=0 to disable for A/B]",
+             config_corner_min_advance_m_, config_corner_front_floor_m_);
+    {   // 误配告警(评审 MEDIUM): 最小前进门若 >= 典型段长(~wall_align) → 短段内拐角可能仅靠贴近豁免兜底; floor 若 >= 触发距离 → 等于关掉最小前进门
+        float corner_trig_dbg = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
+        if (config_corner_min_advance_m_ >= config_wall_align_)
+            ROS_WARN("  [corner guard] min_advance=%.2f >= wall_align=%.2f: corners may not arm within a short leg (only front<floor bypass) -- check move_distance",
+                     config_corner_min_advance_m_, config_wall_align_);
+        if (config_corner_front_floor_m_ >= corner_trig_dbg)
+            ROS_WARN("  [corner guard] front_floor=%.2f >= corner_trig=%.2f: min-advance gate effectively disabled (every front wall is imminent)",
+                     config_corner_front_floor_m_, corner_trig_dbg);
+    }
     ROS_INFO("  findwall(bootstrap): omega=%.2f turn_left=%d confirm=%.2fs max_rot=%.0fdeg timeout=%.1fs | acquire: right both valid & |rear-front|<%.2fm & front>=%.2fm(eff; =wall_align when corner_use_wall_dist)",
              config_findwall_omega_, (int)config_findwall_turn_left_, config_findwall_confirm_sec_,
              config_findwall_max_rot_deg_, config_findwall_timeout_, config_wall_consistency_m_,
@@ -438,12 +456,23 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             float corner_trig = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
             bool has_front_wall = (front_dist > 0.05f && front_dist < corner_trig);
 
-            if (!has_front_wall) {
+            // ===== 加固(0627): 最小前进门 + 贴近真墙安全豁免, 治"全流程分段调用停点停歪→下段刚启动前超声残留<trig→0.15s误拐"。
+            //   每段 total_accumulated_distance 段内清零→门每段自然生效; corner_min_advance_m=0 关门=退回加固前行为(A/B用)。
+            //   双对抗评审收敛(2026-06-27, 2 Opus): 砍掉"前<侧交叉"门(把唯一前向避撞耦合到侧超声、侧读数偏低会压死触发=安全回归)与
+            //   "新鲜度"门(只兜话题整体掉线、且掉线后续走方向存疑、边际价值低); 仅留最小前进门, 并加贴近真墙安全豁免兜两个边角:
+            //   (a)开局即贴真墙时不被盲区拖近; (b)odom 冻结使累计距离卡0时, 保留原"前超声-only、不依赖odom"的避撞(很近的真墙无条件触发)。
+            //   floor 远小于 wall_align(2.0m) → 侧墙掠射读数(≈2.0m)打不开它, 故不削弱防误拐, 只兜真·贴墙。
+            bool guard_adv_ok   = (total_accumulated_distance >= config_corner_min_advance_m_);
+            bool front_imminent = (front_dist < config_corner_front_floor_m_);   // 贴近真墙安全豁免: 很近的前墙无条件允许触发
+            bool corner_fire_ok = has_front_wall && (guard_adv_ok || front_imminent);
+
+            if (!corner_fire_ok) {
                 front_wall_detect_count = 0;
-                corner_armed = true;   // 前方净空 -> 重新武装
+                if (!has_front_wall) corner_armed = true;   // 仅前方真净空才重新武装; 被最小前进门拒绝时不动 armed 态, 保原"触发即下锁、须前净空才再武装"防欠转U转语义
             } else if (corner_armed && ++front_wall_detect_count >= config_corner_front_confirm_) {
                 corner_armed = false;  // 触发即下锁; 须前方重新净空才再武装(评审D MAJOR: 防转向欠转后老前墙仍<trig时立即重触发->累计U转)
-                ROS_WARN("[corner] front wall %.2fm (confirm %d) -> STOP-and-turn", front_dist, front_wall_detect_count);
+                ROS_WARN("[corner] front wall %.2fm (confirm %d adv %.2fm imminent=%d) -> STOP-and-turn",
+                         front_dist, front_wall_detect_count, total_accumulated_distance, (int)front_imminent);
                 wall_avoiding = true;
 
                 // ---------- SETTLE: 20Hz 持续发零运动(泵保持)停稳取入航向, 喂看门狗(替换原盲 sleep) ----------

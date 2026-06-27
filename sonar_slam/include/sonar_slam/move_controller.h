@@ -276,6 +276,8 @@ private:
     float  config_corner_turn_timeout_   = 8.0f;   // 转向硬超时(s)
     float  config_corner_turn_cap_deg_   = 130.0f; // odom 角兜底上限(默认 turn+40°宽裕度): 仅兜 IMU 大故障/防过转, 不与 IMU 到位判据争紧裕度(评审 HIGH)
     bool   config_corner_use_wall_dist_  = true;   // true=前墙触发距离跟随 wall_align(走够离墙距即停转拐弯, 用户指定); false=用独立 corner_front_trigger_m
+    float  config_corner_min_advance_m_  = 0.30f; // 加固(0627): 本段累计前进未达此值前拐角不许触发(段内 total_accumulated_distance 清零→每段自然生效); 防全流程分段调用时停点停歪→下段刚启动前超声残留<trig→0.15s误拐。须 < 段长(move_distance); 置0=关(退回加固前行为, A/B用)
+    float  config_corner_front_floor_m_  = 0.80f; // 加固(0627)安全豁免: 前墙逼近到此距离内则无条件允许触发(始终尊重很近的真前墙), 兜(a)开局即贴墙被盲区拖近 (b)odom冻结累计距离卡0永不触发→撞墙。须 << wall_align 使侧墙掠射(≈2.0m)打不开它
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 构造期读一次; 启动前 rosparam set /xxx) =====
     float config_findwall_omega_       = 0.18f;  // 找墙原地偏航角速度(cmd; ×6.4≈rad/s)。默认0.18(>拐角fine0.10的水下起转阈、≈coarse0.2);
