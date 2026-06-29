@@ -2,7 +2,8 @@
   <!-- ====== [terminal4] 驱动可调参数 (全局命名空间, 对应 hardware_driver 的全局 nh_.param) ======
        不改操作说明 terminal-1 命令(roslaunch ... serial_server.launch)时走下方默认值; 要覆盖: ... track_bias:=0.1
          omega_gain        转向增益(替代写死6.4)            默认6.4
-         track_bias        左右履带静态偏置(>0:右减左增,治"总向左偏")  默认0.1(现场实测达标值,仅平移时补偿); 要回退设0.0
+         track_bias        左右履带静态偏置(>0:右减左增,治"总向左偏")  默认0.1(现场实测达标值,仅平移时补偿); 要回退设0.0; 钳到 +-track_bias_max
+         track_bias_max    track_bias 钳位上限       默认0.30(0628放宽,原死钳0.15); 两电机差异大时调高; 自身硬封顶0.6防失控
          motor_scale       电机标度(替代写死230)            默认230.0
          max_track_speed   履带速度限幅(兜失控,正常不触发)   默认1.0
          max_motor_cmd     电机命令上限(兜底)                默认300
@@ -13,6 +14,7 @@
        默认=*6.4/*230/track_bias=0.1(仅平移补偿)/限幅宽; fused_heading 改 odom 航向(去漂, 预期改善记录位姿)。 -->
   <arg name="omega_gain"         default="6.4"/>
   <arg name="track_bias"         default="0.1"/>
+  <arg name="track_bias_max"     default="0.30"/>
   <arg name="motor_scale"        default="230.0"/>
   <arg name="max_track_speed"    default="1.0"/>
   <arg name="max_motor_cmd"      default="300"/>
@@ -22,6 +24,7 @@
   <arg name="fused_heading_kc"   default="0.02"/>
   <param name="omega_gain"         value="$(arg omega_gain)"/>
   <param name="track_bias"         value="$(arg track_bias)"/>
+  <param name="track_bias_max"     value="$(arg track_bias_max)"/>
   <param name="motor_scale"        value="$(arg motor_scale)"/>
   <param name="max_track_speed"    value="$(arg max_track_speed)"/>
   <param name="max_motor_cmd"      value="$(arg max_motor_cmd)"/>

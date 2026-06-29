@@ -154,13 +154,16 @@ void HardwareDriver::rosNode()
 
     // ===== [terminal4] 差速配平+限幅 / /cmd_vel 看门狗 / 融合航向注入 参数 (默认=保持现行为, 经 serial_server.launch 调) =====
     nh_.param("omega_gain",      omega_gain_,      6.4);
-    nh_.param("track_bias",      track_bias_,      0.1);   // 现场实测默认(治"总向左偏":右减左增); 仅平移时补偿(下方门控); 钳 +-0.15
+    nh_.param("track_bias",      track_bias_,      0.1);   // 现场实测默认(治"总向左偏":右减左增); 仅平移时补偿(下方门控); 钳到 +-track_bias_max(默认0.30)
+    nh_.param("track_bias_max",  track_bias_max_,  0.30);  // 0628放宽: 钳位上限可配(原死钳0.15->默认0.30, 两电机差异大时不再被钳卡); 自身硬封顶0.6防误设失控
     nh_.param("motor_scale",     motor_scale_,     230.0);
     nh_.param("max_track_speed", max_track_speed_, 1.0);
     nh_.param("max_motor_cmd",   max_motor_cmd_,   300);
     nh_.param("cmd_vel_timeout", cmd_vel_timeout_, 0.5);
-    if (track_bias_ >  0.15) track_bias_ =  0.15;
-    if (track_bias_ < -0.15) track_bias_ = -0.15;
+    if (track_bias_max_ < 0.0)  track_bias_max_ = 0.0;
+    if (track_bias_max_ > 0.6)  track_bias_max_ = 0.6;     // 硬封顶: >0.6 => 一侧履带<40%/另侧>160%, 已基本无法直行
+    if (track_bias_ >  track_bias_max_) track_bias_ =  track_bias_max_;
+    if (track_bias_ < -track_bias_max_) track_bias_ = -track_bias_max_;
     if (max_track_speed_ <= 0.0) max_track_speed_ = 1.0;
     if (max_motor_cmd_   <= 0)   max_motor_cmd_   = 300;
     if (cmd_vel_timeout_ <= 0.0) cmd_vel_timeout_ = 0.5;
@@ -172,8 +175,8 @@ void HardwareDriver::rosNode()
     if (fused_heading_kc_ < 0.0) fused_heading_kc_ = 0.0;
     if (fused_heading_kc_ > 0.5) fused_heading_kc_ = 0.5;
     fused_heading_init_ = false;
-    ROS_WARN("[terminal4] driver-merge-20260621 (track_bias default 0.1, compensate only when translating) omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track=%.2f max_motor=%d cmd_vel_timeout=%.2f | fused=%d sign=%+d kc=%.3f",
-             omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_,
+    ROS_WARN("[terminal4] driver-merge-20260621 (+track_bias_max 0628; compensate only when translating) omega_gain=%.2f track_bias=%.3f tbmax=%.2f motor_scale=%.1f max_track=%.2f max_motor=%d cmd_vel_timeout=%.2f | fused=%d sign=%+d kc=%.3f",
+             omega_gain_, track_bias_, track_bias_max_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_,
              (int)use_fused_heading_, fused_heading_sign_, fused_heading_kc_);
 
     keyboardVel_cmd_sub_ = nh_.subscribe("cmd_vel", 100, &HardwareDriver::sendKeyboardVelCommand, this);

@@ -407,6 +407,7 @@ private:
     // 差速配平+限幅 (复用 vcu 走直成果; 默认值=逐位保持现行为, 经 serial_server.launch 调)
     double omega_gain_      = 6.4;    // /cmd_vel angular.z 增益 (原写死 6.4)
     double track_bias_      = 0.0;    // 左右履带静态偏置 (>0:右减左增; 默认0=不补偿; launch 设 0.1)
+    double track_bias_max_  = 0.30;   // track_bias 钳位上限(可配 ~track_bias_max; 0628放宽: 原死钳0.15->默认0.30; 自身硬封顶0.6)
     double motor_scale_     = 230.0;  // 轮速->电机命令标度 (原写死 230)
     double max_track_speed_ = 1.0;    // 履带目标速度限幅 (兜失控)
     int    max_motor_cmd_   = 300;    // 最终电机命令上限 (兜底)
