@@ -219,6 +219,9 @@ private:
         float ctrl_C;
         float ctrl_u;
         int   ctrl_mode;   // 0=无IMU(odom兜底) 1=IMU+超声 2=IMU守航向(丢墙)
+        int   fc_state;    // 拐角降序状态机态 FC_FAR/ACQUIRE/DESCEND/CONFIRM
+        float descend_min; // 降序段已见最小前距(m)
+        int   reacq;       // 转后重新贴墙挂起(1=是, 0=否)
     };
     std::vector<WalkLogData> log_buffer_;
 
@@ -264,6 +267,9 @@ private:
     // 兼治拐角畸变区误锁(评审 BLOCKER)与物理不可能的平行读数。
     float  config_wall_consistency_m_  = 0.5f;
 
+    // 前向降序状态机(lane1, 0629): 拐角触发由"前墙从量程边缘连续逼近"的物理降序模型裁决, 替换旧 B2/远处锚定/in-band/corner_armed。
+    enum FrontCornerState { FC_FAR=0, FC_ACQUIRE=1, FC_DESCEND=2, FC_CONFIRM=3 };
+
     // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 =====
     // 全局 nh_.param, 构造期读一次(终端2 裸 rosrun 无 launch → 默认即操作值, 仅【启动前】rosparam set 生效)。
     bool   config_enable_corner_         = true;   // false=跳过前墙拐角块走纯串级直行(直行段单独整定 + 作回归基线)
@@ -278,11 +284,28 @@ private:
     float  config_corner_turn_cap_deg_   = 130.0f; // odom 角兜底上限(默认 turn+40°宽裕度): 仅兜 IMU 大故障/防过转, 不与 IMU 到位判据争紧裕度(评审 HIGH)
     bool   config_corner_use_wall_dist_  = true;   // true=前墙触发距离跟随 wall_align(走够离墙距即停转拐弯, 用户指定); false=用独立 corner_front_trigger_m
     float  config_corner_min_advance_m_  = 0.30f; // 加固(0627): 本段累计前进未达此值前拐角不许触发(段内 total_accumulated_distance 清零→每段自然生效); 防全流程分段调用时停点停歪→下段刚启动前超声残留<trig→0.15s误拐。须 < 段长(move_distance); 置0=关(退回加固前行为, A/B用)
-    float  config_corner_front_floor_m_  = 0.80f; // 加固(0627)安全豁免: 前墙逼近到此距离内则无条件允许触发(始终尊重很近的真前墙), 兜(a)开局即贴墙被盲区拖近 (b)odom冻结累计距离卡0永不触发→撞墙。须 << wall_align 使侧墙掠射(≈2.0m)打不开它
     float  config_corner_lr_tol_         = 0.30f; // B1(0628 cornergate)前墙左右一致门: 前左/前右读数差 |L-R|>此 = 前墙读数不可信(斜入射单侧回波)→不认有墙。实测合法逼近 |L-R|<=0.024m, 留10x裕度
-    float  config_corner_max_drop_m_     = 0.50f; // B2(0628 cornergate)前距单控制周期最大可信跌幅(m): 相邻可信帧 (prev-front)>此 = 物理不可能的骤降(<=0.25m/s @~20Hz真实~0.0125m/周期)=假短读→拒(磁幅判, 不论绝对距离; 评审MEDIUM:堵[trig,trig+drop)盲带)。留~40x真实裕度
-    float  config_corner_hard_floor_m_   = 0.35f; // 撞墙级无条件豁免(评审HIGH 避撞回归修复): 任一前超声有效且 <此距 → 不论 B1/B2/远处锚定都触发停转(避撞优先)。须 << wall_align(2.0) 使侧墙掠射打不开; 一次2m处误拐可恢复, 0.35m处不避撞=撞墙
-    int    config_corner_dropout_keep_n_ = 8;     // B2 基线掉点容忍(帧, ~0.4s@20Hz): 前超声短暂失效不超过此帧数则保留远处基线+锚定(维持骤降门武装, 兜斜入射常见单通道瞬时掉点=评审critic HIGH); 超过=前墙真离开波束→丢基线。⚠两层叠加: 驱动 filterUltra 先 HOLD 上个有效值 ultra_hold_max(5)帧@10Hz 才出 999, 故有效掩蔽窗≈驱动HOLD+本keep_n, 两者须同向调
+    float  config_corner_hard_floor_m_   = 0.35f; // 撞墙级无条件豁免(点抵近): 任一前超声有效且 <此距 → 不论状态机/压摆/B1 都触发停转(避撞优先, 独立2帧去抖)。须 << wall_align(2.0) 使侧墙掠射打不开; 一次2m处误拐可恢复, 0.35m处不避撞=撞墙
+    int    config_corner_dropout_keep_n_ = 8;     // 掉点容忍(帧, ~0.4s@20Hz): 前超声 B1/压摆短暂失效不超过此帧数则保留降序状态(兜斜入射常见单通道瞬时掉点); 超过=前墙真离开波束→硬复位 FC_FAR。⚠两层叠加: 驱动 filterUltra 先 HOLD 上个有效值 ultra_hold_max(5)帧@10Hz 才出 999, 故有效掩蔽窗≈驱动HOLD+本keep_n, 两者须同向调
+
+    // ===== 前向降序状态机(lane1, 0629) + 转后重新贴墙(lane2) 参数 (全局 nh_.param, 构造期读一次) =====
+    float  config_corner_confirm_start_m_ = 3.0f;  // 进入 DESCEND/CONFIRM 的"开始确认"距离(m): 前墙降到此内才进确认段。次序强制 >= eff_trig+0.3
+    float  config_corner_acquire_max_m_   = 5.0f;  // ACQUIRE 有效窗上限(m, 驱动有效量程顶 5.0): 前墙首见须落在 [confirm_start, acquire_max] 才起步跟踪
+    int    config_corner_acquire_frames_  = 3;     // ACQUIRE 段稳定/降的连续确认帧, 达此进 DESCEND
+    float  config_corner_slew_max_m_      = 0.50f; // (由 corner_max_drop_m 改名重定义)每帧压摆上限(m): 相邻可信帧跳变 > 此 = 单帧毛刺→剔除本帧(连续性前置粗滤 lane4)
+    float  config_corner_monotone_rise_m_ = 0.30f; // 单调容差(m): 抬升不超过此当作平/降(噪声容忍); 超过累计抬升 streak
+    int    config_corner_rise_keep_n_     = 3;     // 抬升 streak 容忍(帧): 连续抬升超此才判前墙离开/复位 FC_FAR(单帧毛刺不硬复位)
+    int    config_corner_point_blank_confirm_ = 2; // 0.35m 点抵近独立去抖(帧): 不受状态机/压摆/B1 门控
+    int    config_corner_inband_confirm_      = 4;  // FC_FAR in-band 恢复: 须连续 B1一致+单调降+<confirm_start 帧数才进 DESCEND(防瞬时假短读); 仅 !reacq_suspend 时启用(转后 suspend 期不走, #3 由 suspend 独立挡)
+    float  config_corner_leg_fraction_    = 0.0f;  // 里程门: 期望段长占比(0=关, 退回绝对 min_advance); advance_req=max(min_advance, frac*expected_leg)
+    float  config_corner_expected_leg_m_  = 0.0f;  // 里程门: 期望段长(m); 与 leg_fraction 配合
+    bool   config_reacquire_enable_       = true;  // 转后重新贴墙总开关
+    float  config_reacquire_min_advance_m_= 0.50f; // 转后放行最小前进(m)
+    float  config_reacquire_standoff_tol_m_= 0.40f;// 转后判 settled 的距墙容差(|d-wall_align|<=此)
+    int    config_reacquire_settle_frames_= 5;     // 连续 settled 帧达此才放行
+    float  config_reacquire_timeout_sec_  = 10.0f; // 转后收敛超时(s, 容忍 2s 暖启): 超时仍未 settled → 停车交人(不盲走)
+    float  config_reacquire_speed_max_    = 0.15f; // 转后挂起期前进限速(m/s)
+    float  config_front_stale_stop_sec_   = 1.5f;  // 前超声话题冻结保护: 超此时长无新鲜前超声帧 -> 停车交人(防盲走)
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 构造期读一次; 启动前 rosparam set /xxx) =====
     float config_findwall_omega_       = 0.18f;  // 找墙原地偏航角速度(cmd; ×6.4≈rad/s)。默认0.18(>拐角fine0.10的水下起转阈、≈coarse0.2);
@@ -301,6 +324,10 @@ private:
     float dbg_C_            = 0.0f;
     float dbg_u_            = 0.0f;
     int   dbg_mode_         = 0;
+    // 拐角降序状态机 + 转后重新贴墙诊断镜像(log-only, 控制路径不动)
+    int   dbg_fc_state_       = 0;      // 降序状态机当前态 FC_FAR/ACQUIRE/DESCEND/CONFIRM
+    float dbg_fc_descend_min_ = -1.0f;  // 降序段已见最小前距(m)
+    bool  dbg_reacquire_      = false;  // 转后重新贴墙挂起中
 
 };
 } // namespace sonar_slam
