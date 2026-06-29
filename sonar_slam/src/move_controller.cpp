@@ -192,8 +192,13 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     < 3.0f)    config_findwall_timeout_     = 3.0f;
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
+    // 行走日志写盘周期(诊断用, log-only 不碰控制): 默认1.0s(原~1Hz不变); 现场 log_period_sec:=0.05 -> 20Hz全速轨迹, 定位拐角触发帧。
+    nh_.param("log_period_sec", config_log_period_sec_, 1.0f);
+    if (config_log_period_sec_ < 0.0f)  config_log_period_sec_ = 0.0f;   // 0 = 每控制拍都记
+    if (config_log_period_sec_ > 10.0f) config_log_period_sec_ = 10.0f;
+
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-cornergate-20260628 (off cornerguard-20260627; ADDS front-read trust gates B1 L/R + B2 far-anchored drop-reject + unconditional point-blank avoid + A post-turn re-arm; relax via corner_lr_tol/corner_max_drop_m large; per-run log to $HOME/sonar_logs/move_logs)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-cornergate-20260628 (off cornerguard-20260627; ADDS front-read trust gates B1 L/R + B2 far-anchored drop-reject + unconditional point-blank avoid + A post-turn re-arm; relax via corner_lr_tol/corner_max_drop_m large; per-run log to $HOME/sonar_logs/move_logs; +log_period_sec param[default 1.0=~1Hz, set 0.05 for 20Hz diag trace])");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -206,6 +211,7 @@ MoveController::MoveController() :
              config_corner_min_advance_m_, config_corner_front_floor_m_);
     ROS_INFO("  corner gate(0628): lr_tol=%.2fm max_drop=%.2fm hard_floor=%.2fm dropout_keep=%d (B1 L/R + B2 far-anchored drop-reject + unconditional point-blank) + A post-turn re-arm (min_advance re-applies per leg-segment)",
              config_corner_lr_tol_, config_corner_max_drop_m_, config_corner_hard_floor_m_, config_corner_dropout_keep_n_);
+    ROS_INFO("  walk-log: period=%.2fs (default 1.0=~1Hz; set log_period_sec:=0.05 for ~20Hz diag trace; log-only, control path untouched)", config_log_period_sec_);
     {   // 误配告警(评审 MEDIUM): 最小前进门若 >= 典型段长(~wall_align) → 短段内拐角可能仅靠贴近豁免兜底; floor 若 >= 触发距离 → 等于关掉最小前进门
         float corner_trig_dbg = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
         if (config_corner_min_advance_m_ >= config_wall_align_)
@@ -1385,7 +1391,7 @@ void MoveController::initWalkLog(const std::string& log_type, float target_dista
 void MoveController::recordWalkData(float current_distance, float target_distance) {
     ros::Time now = ros::Time::now();
     
-    if ((now - last_log_time_).toSec() < 1.0) {
+    if ((now - last_log_time_).toSec() < config_log_period_sec_) {
         return;
     }
     

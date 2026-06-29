@@ -195,6 +195,7 @@ private:
     std::ofstream walk_log_file_;
     std::string current_log_filename_;
     ros::Time last_log_time_;
+    float  config_log_period_sec_ = 1.0f;  // 行走日志写盘节流周期(s): 默认1.0(保持原~1Hz); 诊断 log_period_sec:=0.05 -> 20Hz全速记(前超声+e_par/ctrl_C/拐角状态对齐, 定位拐角触发帧)。仅落盘节流、不碰控制路径。⚠缓存到收尾 saveWalkLog 才落盘, 强杀/断电丢 -> 抗断电原始记录走旁路 ultra_logger.py
     ros::Time walk_start_time_;
     
     // 日志数据结构
