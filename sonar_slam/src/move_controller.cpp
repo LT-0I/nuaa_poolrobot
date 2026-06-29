@@ -145,6 +145,11 @@ MoveController::MoveController() :
     // 加固(0627): 拐角防"分段调用开局误拐"—— 最小前进门 + 贴近真墙安全豁免(参数化; corner_min_advance_m=0 复现加固前行为, A/B用)
     nh_.param("corner_min_advance_m", config_corner_min_advance_m_, 0.30f);
     nh_.param("corner_front_floor_m", config_corner_front_floor_m_, 0.80f);
+    // 加固(0628 cornergate): 前墙读数可信门 B1 左右一致 + B2 远处锚定/骤降拒 + 撞墙级无条件豁免 + 掉点容忍(治斜入射瞬时假短读触发误拐, 0628老车实测前墙真距~4.7m却拐)
+    nh_.param("corner_lr_tol",        config_corner_lr_tol_,        0.30f);
+    nh_.param("corner_max_drop_m",    config_corner_max_drop_m_,    0.50f);
+    nh_.param("corner_hard_floor_m",  config_corner_hard_floor_m_,  0.35f);
+    nh_.param("corner_dropout_keep_n",config_corner_dropout_keep_n_,8);
     // 夹限防误设
     if (config_corner_front_confirm_   < 1)     config_corner_front_confirm_   = 1;
     if (config_corner_front_trigger_m_ < 0.4f)  config_corner_front_trigger_m_ = 0.4f;
@@ -163,6 +168,14 @@ MoveController::MoveController() :
     if (config_corner_min_advance_m_   > 5.0f) config_corner_min_advance_m_   = 5.0f;
     if (config_corner_front_floor_m_   < 0.0f) config_corner_front_floor_m_   = 0.0f;
     if (config_corner_front_floor_m_   > 1.5f) config_corner_front_floor_m_   = 1.5f;
+    if (config_corner_lr_tol_          < 0.02f) config_corner_lr_tol_         = 0.02f;
+    if (config_corner_lr_tol_          > 2.0f)  config_corner_lr_tol_         = 2.0f;
+    if (config_corner_max_drop_m_      < 0.05f) config_corner_max_drop_m_     = 0.05f;
+    if (config_corner_max_drop_m_      > 5.0f)  config_corner_max_drop_m_     = 5.0f;
+    if (config_corner_hard_floor_m_    < 0.05f) config_corner_hard_floor_m_   = 0.05f;
+    if (config_corner_hard_floor_m_    > 1.0f)  config_corner_hard_floor_m_   = 1.0f;
+    if (config_corner_dropout_keep_n_  < 0)     config_corner_dropout_keep_n_ = 0;
+    if (config_corner_dropout_keep_n_  > 100)   config_corner_dropout_keep_n_ = 100;
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 启动前 rosparam set /xxx) =====
     nh_.param("findwall_omega",       config_findwall_omega_,       0.18f);
@@ -180,7 +193,7 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-cornerguard-minadv-floor-20260627 (off wa2m-20260622; ADDS corner anti-false-trigger: min-advance gate + near-wall floor bypass; set corner_min_advance_m=0 to reproduce pre-guard behavior for A/B; per-run log to $HOME/sonar_logs/move_logs)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-cornergate-20260628 (off cornerguard-20260627; ADDS front-read trust gates B1 L/R + B2 far-anchored drop-reject + unconditional point-blank avoid + A post-turn re-arm; relax via corner_lr_tol/corner_max_drop_m large; per-run log to $HOME/sonar_logs/move_logs)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -191,6 +204,8 @@ MoveController::MoveController() :
              config_corner_turn_cap_deg_, config_corner_turn_timeout_);
     ROS_INFO("  corner guard(0627): min_advance=%.2fm near_wall_floor=%.2fm [set corner_min_advance_m=0 to disable for A/B]",
              config_corner_min_advance_m_, config_corner_front_floor_m_);
+    ROS_INFO("  corner gate(0628): lr_tol=%.2fm max_drop=%.2fm hard_floor=%.2fm dropout_keep=%d (B1 L/R + B2 far-anchored drop-reject + unconditional point-blank) + A post-turn re-arm (min_advance re-applies per leg-segment)",
+             config_corner_lr_tol_, config_corner_max_drop_m_, config_corner_hard_floor_m_, config_corner_dropout_keep_n_);
     {   // 误配告警(评审 MEDIUM): 最小前进门若 >= 典型段长(~wall_align) → 短段内拐角可能仅靠贴近豁免兜底; floor 若 >= 触发距离 → 等于关掉最小前进门
         float corner_trig_dbg = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
         if (config_corner_min_advance_m_ >= config_wall_align_)
@@ -366,6 +381,12 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     bool wall_avoiding = false;
     int front_wall_detect_count = 0;
     bool corner_armed = true;             // 拐角触发武装位: 触发即下锁, 须前方重新净空才再武装(防欠转后老前墙仍在视野立即重触发->累计U转)
+    // 加固(0628 cornergate): B2 远处锚定/骤降门历史 + A 拐后再武装基准
+    float prev_front_plausible = -1.0f;   // B2: 最近可信前墙距(m); -1=无基线(前墙不在波束/持续掉点/刚拐完)
+    bool  front_far_anchored = false;     // B2: 是否已"看到前墙在 >=corner_trig 处并持续跟踪至今"(看着它从远处接近); 仅远处读数置位; 测距档拐角必须此为真(凭空短读不触发)
+    int   front_invalid_streak = 0;       // B2: 连续前超声失效帧数; <=corner_dropout_keep_n 的短暂掉点不丢基线/锚定(兜斜入射单通道掉点), 超过=前墙真离开
+    int   front_inband_anchor_count = 0;  // B2: 冷启动 in-band 锚定佐证计数(前墙首见即<trig时, 连续 B1一致 帧数, 达 2*confirm 才锚定)
+    float corner_guard_ref_dist = 0.0f;   // A: 最小前进门的累计距离基准; 每次拐角后重置=total_accumulated_distance, 使门按"本拐角后的段"重新生效(拐后须再走够 corner_min_advance_m 才允许再触发)
     bool pump_closed_early = false;
     
     // 角度累积变量
@@ -454,23 +475,66 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             // (无效/无回波在 ultraCallback 已兜成 999 > trigger, 自然排除)。评审 PARTIAL 安全项。
             // 前墙触发距离: corner_use_wall_dist=true 时跟随 wall_align(走够离墙距即停转, 用户指定逻辑); 否则用独立 corner_front_trigger_m
             float corner_trig = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
-            bool has_front_wall = (front_dist > 0.05f && front_dist < corner_trig);
 
-            // ===== 加固(0627): 最小前进门 + 贴近真墙安全豁免, 治"全流程分段调用停点停歪→下段刚启动前超声残留<trig→0.15s误拐"。
-            //   每段 total_accumulated_distance 段内清零→门每段自然生效; corner_min_advance_m=0 关门=退回加固前行为(A/B用)。
-            //   双对抗评审收敛(2026-06-27, 2 Opus): 砍掉"前<侧交叉"门(把唯一前向避撞耦合到侧超声、侧读数偏低会压死触发=安全回归)与
-            //   "新鲜度"门(只兜话题整体掉线、且掉线后续走方向存疑、边际价值低); 仅留最小前进门, 并加贴近真墙安全豁免兜两个边角:
-            //   (a)开局即贴真墙时不被盲区拖近; (b)odom 冻结使累计距离卡0时, 保留原"前超声-only、不依赖odom"的避撞(很近的真墙无条件触发)。
-            //   floor 远小于 wall_align(2.0m) → 侧墙掠射读数(≈2.0m)打不开它, 故不削弱防误拐, 只兜真·贴墙。
-            bool guard_adv_ok   = (total_accumulated_distance >= config_corner_min_advance_m_);
-            bool front_imminent = (front_dist < config_corner_front_floor_m_);   // 贴近真墙安全豁免: 很近的前墙无条件允许触发
-            bool corner_fire_ok = has_front_wall && (guard_adv_ok || front_imminent);
+            // ===== 加固(0628 cornergate): 前墙读数可信门 B1 一致 + B2 远处锚定/骤降拒 + 撞墙级无条件豁免, 治"前超声斜入射瞬时假短读触发误拐"(0628老车实测: 前墙真距~4.7m却拐, 拐进开阔水域丢墙瞎走)。
+            //   B1 左右一致门: 前左/前右都有效(在 [0.05,900)m) 且 |L-R|<=corner_lr_tol。实测两次合法逼近 |L-R|<=0.024m; 单侧斜回波必造成大分歧→拒。
+            //   B2 远处锚定 + 骤降门(测距档拐角的承重墙): 必须"看着前墙从 >=corner_trig 处接近过来"(front_far_anchored)才信 → 凭空冒出的短读(无远处接近史)不触发(评审critic HIGH: 关掉冷启动假短读洞)。
+            //     prev_front_plausible 记最近可信前距; "上一可信帧仍远在 trig+corner_max_drop_m 外、本帧却已 <trig" = 一周期不可能的骤降(<=0.25m/s)=假短读→拒且不更新基线(滤毛刺; 持续假短读每帧都被同一远基线判骤降→持续拒)。
+            //     斜入射常致单/双通道瞬时失效(999): 容忍 <=corner_dropout_keep_n 帧失效而不丢基线/锚定(否则 prev 被清→B2 失效=评审critic HIGH 的洞); 持续失效超阈才判前墙真离开、清基线+锚定。
+            //     <=0.25m/s + 20Hz 看门狗下真墙单周期跌幅~0.0125m, 故真·快速逼近不会触发骤降门(无误拒/锁死)。
+            bool front_lr_valid = (front_left_dist  > 0.05f && front_left_dist  < 900.0f &&
+                                   front_right_dist > 0.05f && front_right_dist < 900.0f);
+            bool front_consistent = front_lr_valid &&
+                                    (std::fabs(front_left_dist - front_right_dist) <= config_corner_lr_tol_);      // B1
+            bool front_rate_jump = front_far_anchored && prev_front_plausible >= 0.0f &&
+                                   ((prev_front_plausible - front_dist) > config_corner_max_drop_m_);              // B2 骤降: 单控制周期跌幅 > corner_max_drop_m = 物理不可能(<=0.25m/s @~20Hz真实~0.0125m/周期)=假短读(评审MEDIUM:磁幅判, 不留[trig,trig+drop)盲带)
+            // 基线/锚定维护(用本帧前的 anchored 判完 rate_jump 后再更新):
+            if (!front_lr_valid) {
+                front_inband_anchor_count = 0;                                  // 掉点=不连续, 冷启动 in-band 锚定佐证清零
+                if (++front_invalid_streak > config_corner_dropout_keep_n_) {   // 持续掉点=前墙真离开波束
+                    prev_front_plausible = -1.0f; front_far_anchored = false;
+                }   // 否则: 短暂斜入射掉点, 保留基线+锚定维持 B2 武装
+            } else {
+                front_invalid_streak = 0;
+                if (front_dist >= corner_trig) {                       // 看到远处前墙 → 锚定 + 更新基线
+                    front_far_anchored = true; prev_front_plausible = front_dist; front_inband_anchor_count = 0;
+                } else if (front_far_anchored) {                       // 已锚定, 跟踪接近中(<trig): 非骤降才更新基线(骤降帧保留旧基线滤毛刺)
+                    if (!front_rate_jump) prev_front_plausible = front_dist;
+                    front_inband_anchor_count = 0;
+                } else if (front_consistent) {
+                    // 冷启动/拐后 in-band 锚定(评审 MEDIUM 修复): 前墙"首见即 <trig"(无远处接近史, 如拐后近墙/窄段/2m分段)时,
+                    //   要求 B1一致 且连续稳定 2*confirm 帧(强佐证, 远高于普通confirm)才锚定 → 使真·近前墙仍能在 wall_align 触发停转,
+                    //   而非只靠 0.35m 撞墙级豁免; 斜入射闪烁/单侧假短读凑不齐连续一致帧, 不会借此误锚。
+                    if (++front_inband_anchor_count >= 2 * config_corner_front_confirm_) {
+                        front_far_anchored = true; prev_front_plausible = front_dist;
+                    }
+                } else {
+                    front_inband_anchor_count = 0;                     // B1不一致的冷读数: 清佐证计数
+                }
+            }
+            // 测距档前墙: B1 一致 + 远处锚定 + 非骤降 + 落入触发距
+            bool has_front_wall = front_consistent && front_far_anchored && !front_rate_jump &&
+                                  (front_dist > 0.05f && front_dist < corner_trig);
+
+            // ===== 加固(0627): 最小前进门 + 贴近真墙豁免, 治"全流程分段调用停点停歪→下段刚启动前超声残留<trig→0.15s误拐"。
+            //   corner_guard_ref_dist 为本段(含每次拐角后)基准, 段内累计前进未达 corner_min_advance_m 前不许触发; corner_min_advance_m=0 关门=退回加固前行为(A/B用)。
+            //   A(0628): guard 用 corner_guard_ref_dist 做"本拐角后段"基准(拐后重置), 拐后须再走够 corner_min_advance_m 才允许再触发(防欠转/分段全流程逐段开局误拐)。
+            bool guard_adv_ok   = ((total_accumulated_distance - corner_guard_ref_dist) >= config_corner_min_advance_m_);
+            bool front_imminent = (front_dist < config_corner_front_floor_m_);   // 测距档贴近豁免(已过 B1/B2/锚定): 仅跳过最小前进门
+            // 撞墙级无条件豁免(评审 HIGH 避撞回归修复): 任一前超声有效且极近, 不论 B1/B2/锚定都触发停转避撞。
+            //   评审指出: 原 floor(0.80) 被 B1 一致门 AND 掉=斜入射近墙不再避撞=安全回归。故另设更紧的 hard_floor 无条件路径;
+            //   hard_floor(0.35) << wall_align(2.0) → 侧墙掠射(≈2.0m)打不开、不削弱测距档防误拐; 仍受下方 corner_armed+confirm 去抖(同基线 floor 语义)。
+            bool front_point_blank = (front_left_dist  > 0.05f && front_left_dist  < config_corner_hard_floor_m_) ||
+                                     (front_right_dist > 0.05f && front_right_dist < config_corner_hard_floor_m_);
+            bool corner_fire_ok = (has_front_wall && (guard_adv_ok || front_imminent)) || front_point_blank;
 
             if (!corner_fire_ok) {
                 front_wall_detect_count = 0;
-                if (!has_front_wall) corner_armed = true;   // 仅前方真净空才重新武装; 被最小前进门拒绝时不动 armed 态, 保原"触发即下锁、须前净空才再武装"防欠转U转语义
-            } else if (corner_armed && ++front_wall_detect_count >= config_corner_front_confirm_) {
-                corner_armed = false;  // 触发即下锁; 须前方重新净空才再武装(评审D MAJOR: 防转向欠转后老前墙仍<trig时立即重触发->累计U转)
+                // 重新武装只在"真净空"时(评审 LOW 收紧): 看到远处(>=trig)或基线已因持续掉点清空(前墙真离开); 不因 B1/B2 拒一个"在场但不可信"读数就重武装。far_anchored 本身已挡欠转后老墙的立即重触发。
+                bool front_truly_clear = (front_lr_valid && front_dist >= corner_trig) || (prev_front_plausible < 0.0f);
+                if (front_truly_clear) corner_armed = true;
+            } else if ((corner_armed || front_point_blank) && ++front_wall_detect_count >= config_corner_front_confirm_) {
+                corner_armed = false;  // 触发即下锁; 测距档须前方重新净空才再武装(防欠转后老墙仍<trig立即重触发->累计U转)。撞墙级 point_blank 不受 armed 限(评审HIGH: 否则欠转后<0.35m近墙在disarmed态既不触发又不重武装→撞墙), 避撞优先
                 ROS_WARN("[corner] front wall %.2fm (confirm %d adv %.2fm imminent=%d) -> STOP-and-turn",
                          front_dist, front_wall_detect_count, total_accumulated_distance, (int)front_imminent);
                 wall_avoiding = true;
@@ -618,6 +682,8 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 ramp_start_time = ros::Time::now();   // 速度 + 外环 C 双软启动重置
                 front_wall_detect_count = 0;
                 wall_avoiding = false;
+                corner_guard_ref_dist = total_accumulated_distance;   // A(0628): 拐后重置最小前进门基准 → 本拐角后须再走够 corner_min_advance_m 才允许再触发(段首settle窗口; 防欠转/分段逐段开局误拐)
+                prev_front_plausible = -1.0f; front_far_anchored = false; front_invalid_streak = 0; front_inband_anchor_count = 0;   // B(0628): 拐后几何全变, 清前距基线/远处锚定/掉点&in-band佐证计数, 新墙须重新锚定才触发(防欠转后老墙立即再触发)
                 // corner_armed 此处刻意不复位: 转向欠转时老前墙仍<trig, 须靠上方 !has_front_wall 数据驱动重新武装(勿在此加 =true 否则重开欠转 U 转洞)
 
                 // 恢复前进速度

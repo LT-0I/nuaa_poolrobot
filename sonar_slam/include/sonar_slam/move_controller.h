@@ -278,6 +278,10 @@ private:
     bool   config_corner_use_wall_dist_  = true;   // true=前墙触发距离跟随 wall_align(走够离墙距即停转拐弯, 用户指定); false=用独立 corner_front_trigger_m
     float  config_corner_min_advance_m_  = 0.30f; // 加固(0627): 本段累计前进未达此值前拐角不许触发(段内 total_accumulated_distance 清零→每段自然生效); 防全流程分段调用时停点停歪→下段刚启动前超声残留<trig→0.15s误拐。须 < 段长(move_distance); 置0=关(退回加固前行为, A/B用)
     float  config_corner_front_floor_m_  = 0.80f; // 加固(0627)安全豁免: 前墙逼近到此距离内则无条件允许触发(始终尊重很近的真前墙), 兜(a)开局即贴墙被盲区拖近 (b)odom冻结累计距离卡0永不触发→撞墙。须 << wall_align 使侧墙掠射(≈2.0m)打不开它
+    float  config_corner_lr_tol_         = 0.30f; // B1(0628 cornergate)前墙左右一致门: 前左/前右读数差 |L-R|>此 = 前墙读数不可信(斜入射单侧回波)→不认有墙。实测合法逼近 |L-R|<=0.024m, 留10x裕度
+    float  config_corner_max_drop_m_     = 0.50f; // B2(0628 cornergate)前距单控制周期最大可信跌幅(m): 相邻可信帧 (prev-front)>此 = 物理不可能的骤降(<=0.25m/s @~20Hz真实~0.0125m/周期)=假短读→拒(磁幅判, 不论绝对距离; 评审MEDIUM:堵[trig,trig+drop)盲带)。留~40x真实裕度
+    float  config_corner_hard_floor_m_   = 0.35f; // 撞墙级无条件豁免(评审HIGH 避撞回归修复): 任一前超声有效且 <此距 → 不论 B1/B2/远处锚定都触发停转(避撞优先)。须 << wall_align(2.0) 使侧墙掠射打不开; 一次2m处误拐可恢复, 0.35m处不避撞=撞墙
+    int    config_corner_dropout_keep_n_ = 8;     // B2 基线掉点容忍(帧, ~0.4s@20Hz): 前超声短暂失效不超过此帧数则保留远处基线+锚定(维持骤降门武装, 兜斜入射常见单通道瞬时掉点=评审critic HIGH); 超过=前墙真离开波束→丢基线。⚠两层叠加: 驱动 filterUltra 先 HOLD 上个有效值 ultra_hold_max(5)帧@10Hz 才出 999, 故有效掩蔽窗≈驱动HOLD+本keep_n, 两者须同向调
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 构造期读一次; 启动前 rosparam set /xxx) =====
     float config_findwall_omega_       = 0.18f;  // 找墙原地偏航角速度(cmd; ×6.4≈rad/s)。默认0.18(>拐角fine0.10的水下起转阈、≈coarse0.2);
