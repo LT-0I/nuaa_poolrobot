@@ -256,7 +256,8 @@ private:
 
     // ========== [vcu] 简化版 VCU 差速补偿 + 看门狗 参数/状态（默认值=保持现行为）==========
     double                  omega_gain_       = 6.4;    // 替代写死 6.4
-    double                  track_bias_       = 0.0;    // 左右履带静态偏置补偿，夹到 [-0.15, +0.15]
+    double                  track_bias_       = 0.0;    // 左右履带静态偏置补偿，夹到 [-track_bias_max, +track_bias_max]
+    double                  track_bias_max_   = 0.30;   // track_bias 钳位上限(可配 ~track_bias_max; 0628放宽: 原死钳0.15->默认0.30; 自身硬封顶0.6)
     double                  motor_scale_      = 230.0;  // 替代写死 230
     double                  max_track_speed_  = 1.0;    // 履带目标速度限幅(m/s)，仅兜失控
     int                     max_motor_cmd_    = 300;    // 电机命令限幅，仅兜失控

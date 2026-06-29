@@ -147,21 +147,24 @@ void HardwareDriver::rosNode()
     // 默认: omega_gain=6.4 / motor_scale=230（沿旧码）; track_bias=0.1（现场实测默认, 治"总向左偏": 右减左增）。
     // 改这些参数走 launch / rosparam，现场不需重编。
     nh_.param("omega_gain",      omega_gain_,      6.4);
-    nh_.param("track_bias",      track_bias_,      0.1);   // 现场实测默认; 下方夹到 +-0.15
+    nh_.param("track_bias",      track_bias_,      0.1);   // 现场实测默认; 下方夹到 +-track_bias_max(默认0.30)
+    nh_.param("track_bias_max",  track_bias_max_,  0.30);  // 0628放宽: 钳位上限可配(原死钳0.15->默认0.30, 两电机差异大时不再被钳卡); 自身硬封顶0.6防误设失控
     nh_.param("motor_scale",     motor_scale_,     230.0);
     nh_.param("max_track_speed", max_track_speed_, 1.0);
     nh_.param("max_motor_cmd",   max_motor_cmd_,   300);
     nh_.param("cmd_vel_timeout", cmd_vel_timeout_, 0.5);
-    // 安全夹限：track_bias 限到 +-0.15；其余防误设 0/负锁死或失控。
-    if (track_bias_ >  0.15) track_bias_ =  0.15;
-    if (track_bias_ < -0.15) track_bias_ = -0.15;
+    // 安全夹限：track_bias 限到 +-track_bias_max（0628放宽: 默认0.30, max 自身硬封顶0.6）；其余防误设 0/负锁死或失控。
+    if (track_bias_max_ < 0.0)  track_bias_max_ = 0.0;
+    if (track_bias_max_ > 0.6)  track_bias_max_ = 0.6;     // 硬封顶: >0.6 => 一侧履带<40%/另侧>160%, 已基本无法直行
+    if (track_bias_ >  track_bias_max_) track_bias_ =  track_bias_max_;
+    if (track_bias_ < -track_bias_max_) track_bias_ = -track_bias_max_;
     if (max_track_speed_ <= 0.0) max_track_speed_ = 1.0;
     if (max_motor_cmd_   <= 0)   max_motor_cmd_   = 300;
     if (cmd_vel_timeout_ <= 0.0) cmd_vel_timeout_ = 0.5;
     cmd_vel_received_ = false;
-    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v3-20260621，track_bias 默认 0.1 且仅平移时补偿）
-    ROS_WARN("[vcu] hardware_driver VCU-v3-20260621 omega_gain=%.2f track_bias=%.3f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
-             omega_gain_, track_bias_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_);
+    // 版本 banner（ASCII，供现场 grep 自判闸门：VCU-v3-20260621 +track_bias_max 0628，track_bias 默认 0.1 且仅平移时补偿）
+    ROS_WARN("[vcu] hardware_driver VCU-v3-20260621 (+track_bias_max 0628) omega_gain=%.2f track_bias=%.3f tbmax=%.2f motor_scale=%.1f max_track_speed=%.2f max_motor_cmd=%d cmd_vel_timeout=%.2f",
+             omega_gain_, track_bias_, track_bias_max_, motor_scale_, max_track_speed_, max_motor_cmd_, cmd_vel_timeout_);
 
     keyboardVel_cmd_sub_ = nh_.subscribe("cmd_vel", 100, &HardwareDriver::sendKeyboardVelCommand, this);
     autoVel_cmd_sub_ = nh_.subscribe("/autoVel_cmd", 100, &HardwareDriver::sendAutoVelCommand, this);
@@ -1876,7 +1879,7 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
     double right_speed = v + w * half_track;
     double left_speed  = v - w * half_track;
 
-    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-0.15；默认 0.1 -> 右减左增治左偏）。
+    // 3. 左右履带静态偏置补偿（track_bias_ 已在 rosNode() 夹到 +-track_bias_max[默认0.30,硬封顶0.6]；默认 0.1 -> 右减左增治左偏）。
     //    track_bias>0：右减左增（治“总向左偏”）；<0 反之。
     //    仅在有平移分量(|v|>eps)时补偿：纯原地转向(v≈0, rect/zig 拐角)不加偏置 -> 转向命令左右对称。
     //    注：转向走 /imu_heading 航向闭环，最终转角不受偏置有无影响；偏置只会给转向中车体加一点
@@ -1886,7 +1889,7 @@ void HardwareDriver::sendKeyboardVelCommand(const geometry_msgs::Twist &cmd_vel)
         left_speed  *= (1.0 + track_bias_);
     }
 
-    // 4. 方向标志（喂里程计）：用补偿后的速度符号，与实际下发命令一致；|bias|<=0.15 不翻号。
+    // 4. 方向标志（喂里程计）：用补偿后的速度符号，与实际下发命令一致；track_bias<1.0 时 (1-bias)>0 不翻号（0.6 硬封顶保证 1-bias>=0.4>0）。
     flagdirR = (right_speed >= 0) ? 1 : -1;
     flagdirL = (left_speed  >= 0) ? 1 : -1;
 

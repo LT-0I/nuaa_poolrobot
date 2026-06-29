@@ -5,7 +5,8 @@
        默认值=保持现行为（×6.4/×230 历史标定、track_bias=0 不补偿）→ 与旧码逐位等价、0613 直线不受影响。
        改完看驱动启动 banner "[vcu] hardware_driver VCU-v1-20260613 ..." 确认实际生效值（自验闸门）。
          omega_gain      转向增益(替代写死6.4)     默认6.4    范围1.0~6.4
-         track_bias      左右履带静态偏置补偿        默认0.0    范围-0.15~+0.15（>0 治"总向左偏"，步长0.01~0.02）
+         track_bias      左右履带静态偏置补偿        默认0.0    范围-track_bias_max~+track_bias_max（0628放宽:上限可配,默认0.30; >0 治"总向左偏"，步长0.01~0.02）
+         track_bias_max  track_bias 钳位上限         默认0.30   两电机差异大时调高(原死钳0.15); 自身硬封顶0.6防失控
          motor_scale     电机标度(替代写死230)      默认230.0  按实车标定
          max_track_speed 履带速度限幅(m/s)          默认1.0    仅兜失控（正常峰值~0.65-0.82）
          max_motor_cmd   电机命令限幅               默认300    待MCU安全上限确认后回填
@@ -14,12 +15,14 @@
        ⚠ 范围：被改的是 /cmd_vel 路径——键控/走直线 heading_straight/沿边 move_controller(实发 /cmd_vel)都经此，故 omega_gain/track_bias/限幅/看门狗对沿边也生效；未覆盖 /autoVel_cmd(motion_controller 备用+矩形巡走)。看门狗 0.5s 超时勿短于任一 /cmd_vel 发布方的最长缺口(move_controller 主动行走≤0.3s安全，启用沿边前复核)。 -->
   <arg name="omega_gain"      default="6.4"/>
   <arg name="track_bias"      default="0.0"/>
+  <arg name="track_bias_max"  default="0.30"/>
   <arg name="motor_scale"     default="230.0"/>
   <arg name="max_track_speed" default="1.0"/>
   <arg name="max_motor_cmd"   default="300"/>
   <arg name="cmd_vel_timeout" default="0.5"/>
   <param name="omega_gain"      value="$(arg omega_gain)"/>
   <param name="track_bias"      value="$(arg track_bias)"/>
+  <param name="track_bias_max"  value="$(arg track_bias_max)"/>
   <param name="motor_scale"     value="$(arg motor_scale)"/>
   <param name="max_track_speed" value="$(arg max_track_speed)"/>
   <param name="max_motor_cmd"   value="$(arg max_motor_cmd)"/>
