@@ -21,7 +21,9 @@ sonar_stitch.py - 声呐子图离线拼接 (ICP)
 # 本轮仅改 section 0 参数: MAX_CORRECTION_TRANS 0.80->1.5(放宽 ICP 接受门, 容忍停点间大 odom 漂移的修正)。
 # 模块默认 MIN_INNER=90(view 档); 双图(loc=60 稠密定位图 / view=90 干净显示图)由 sonar_stitch_node 编排同一
 # main() 跑两遍, 其余 7 个通用滤波参数可经 ~stitch_* 覆盖, MIN_INNER 两档经 ~stitch_min_inner_loc / ~stitch_min_inner_view。
-STITCH_VERSION = "sonar-stitch-maxcorr1p5-param-20260626"
+# 20260701: main() 增补 points_index 格式适配块(照搬 pinjie-auto2.py)——手动采集(point_id 列)也可拼;
+#   自动采集(sonar_odom_log.csv 有 pose_* 列、无 point_id)为 no-op、拼接算法与产物逐字不变。
+STITCH_VERSION = "sonar-stitch-pointsindex-adapter-20260701"
 
 import open3d as o3d
 import numpy as np
@@ -633,6 +635,20 @@ def main():
     except Exception as e:
         print(f"读取里程计表格失败: {e}")
         return
+
+    # ================= [格式适配] 手动采集(points_index)格式 -> 拼接所需列 =================
+    # 照搬 pinjie-auto2.py: 若里程计表是 manual_collect 的 points_index 格式(有 point_id 列),
+    # 映射到 position/pose_x/pose_y/pose_theta_deg/pointcloud_file (yaw 弧度 -> 角度)。
+    # 守卫式: 自动采集的 sonar_odom_log.csv 已含 pose_* 列且无 point_id -> 本块 no-op, 自动管线行为不变。
+    if 'point_id' in df_odom.columns:
+        print(">> points_index-format odom detected: mapping fields + yaw rad->deg")
+        df_odom['position']        = df_odom['point_id']
+        df_odom['pose_x']          = df_odom['x_at_scan']
+        df_odom['pose_y']          = df_odom['y_at_scan']
+        df_odom['pose_theta_deg']  = np.degrees(df_odom['yaw_at_scan'])
+        df_odom['pointcloud_file'] = df_odom['deliverable_basename'].apply(
+            lambda x: f"{x}.pcd" if not str(x).endswith('.pcd') else x)
+    # =====================================================================================
 
     # 检查必要列
     required_cols = ['position', 'pose_x', 'pose_y', 'pose_theta_deg', 'pointcloud_file']

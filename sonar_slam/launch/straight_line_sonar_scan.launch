@@ -1,0 +1,89 @@
+<launch>
+  <!-- ====================================================================
+       下水直线前进 + 定点声呐扫描 + 自动建图 一键入口
+       (沿边运动学困难 -> 改直线; 声呐扫描/记文件/自动建图 均复用现有节点)
+       逻辑: 直线前进固定距离 -> 停 -> 开声呐扫一圈 -> 记文件
+             -> 再直线前进 ... 共 num_positions 个点 -> 采完自动拼图(两遍出两图)
+       与 wall_follow_sonar_scan.launch 的唯一区别:
+         move_controller 置 wall_follow_enable=false => 直行模式
+           (外环距墙/平行环停用 C=0 + 拐角停转关 -> 纯内环 IMU 航向保持直线; 不读超声侧距)
+         声呐扫描一圈/记文件/自动建图 与沿边版完全一致(main 基线扫描内核 + pintu 两图拼接)。
+       ....................................................................
+       前置(本 launch 不含, 须先起): 硬件驱动 serial_server.launch
+         (发 /imu_heading /ultra_data, 收 /cmd_vel; 直行 IMU 航向保持须 /imu_heading)
+       Ping360 声呐串口默认 /dev/ttyACM0
+       ....................................................................
+       ⚠ 安全: 直行模式无前墙避障(不读超声、不停转)。停车靠 move_straight 里程停点 +
+         每段 timeout; 机器人不会自动避开正前方池壁 -> 操作员须确保
+         num_positions * move_distance < 可用直线水域长度; 可靠停车仍以断电为准。
+       ====================================================================
+       命名空间注意(重要, 同沿边版):
+         move_controller_node 用默认 NodeHandle => 读"全局" /xxx, 整定参数必须放 <launch> 顶层 <param>;
+         multi_position_sonar_mapper 用私有 NodeHandle nh("~") => 读"私有" ~xxx, 参数放 <node> 内。
+       ==================================================================== -->
+
+  <!-- ===== 声呐 / 采集参数 (mapper 私有命名空间 phase1/) ===== -->
+  <arg name="serial_port"       default="/dev/ttyACM0"/>  <!-- Ping360 声呐串口 -->
+  <arg name="baudrate"          default="115200"/>
+  <arg name="range_level"       default="s5"/>            <!-- 声呐量程档; 默认 s5(≈14m)匹配 pintu 已验证采集档; 按实际水域/建图范围调(需覆盖待测墙面) -->
+  <arg name="num_positions"     default="5"/>             <!-- 采集停点数(3-50); 默认 5=pintu 参考采集点数 -->
+  <arg name="move_distance"     default="4.0"/>           <!-- 每段直线前进距离(米); 默认 4.0(pintu 相邻点 ~4.5m); 按实际停点间距调 -->
+  <arg name="scan_duration"     default="100.0"/>         <!-- ★每点扫描硬超时(秒): 到点即强制存盘并前进、不管扫没扫满! 必须 >= 声呐实测扫满一圈耗时。默认 100=代码原值(保守); 权威值 95.0; 现场看日志"完成第N圈扫描!耗时X秒"取其 1.5~2 倍 -->
+  <arg name="wait_duration"     default="60.0"/>          <!-- 换点移动看门狗(秒): move_straight timeout=max(本值, move_distance*15) -->
+  <!-- 注: required_circles 故意不暴露 —— multi_position_sonar_mapper.cpp 内硬写=1, 每点恒扫 1 圈 -->
+
+  <!-- 直行模式: 无需人工对齐墙/无需找墙; 直接对准前进方向下水即可。acquire_wall_first 恒 false。 -->
+  <arg name="acquire_wall_first" default="false"/>
+  <arg name="acquire_distance"  default="0.5"/>
+
+  <!-- ===== 拼图开关 (两图, 算法=pintu pinjie-auto2) ===== -->
+  <arg name="enable_stitch"     default="true"/>          <!-- true=采集全部停点完成后自动离线拼图【两遍出两图】: <session>/stitching_loc.pcd(定位) + stitching_view.pcd(显示); false=只采集不拼。拼图需机上装 open3d/scipy/pandas/numpy -->
+  <arg name="stitch_min_inner_loc"  default="60"/>        <!-- 定位图(loc, 稠密)逐帧滤波内圈强度门; 供 g 单点声呐定位 ICP -->
+  <arg name="stitch_min_inner_view" default="90"/>        <!-- 显示图(view, 干净)逐帧滤波内圈强度门; 供 g rviz 显示底图。其余7个滤波参数两图通用, 可用 ~stitch_* 私有参数覆盖 -->
+
+  <!-- ===== 直行 / 运动参数 (move_controller 读全局命名空间) ===== -->
+  <arg name="wall_follow_enable" default="false"/>        <!-- ★false=直行模式(本 launch 目的): 纯 IMU 航向保持直线, 不读超声侧距、不拐角停转。true 才是沿边(那应改用 wall_follow_sonar_scan.launch) -->
+  <arg name="enable_corner"     default="false"/>         <!-- 直行模式下拐角停转关(冗余显式钉住: 防吃 rosmaster 残留; wall_follow_enable=false 时构造期也会强制关) -->
+  <arg name="speed"             default="0.25"/>          <!-- 前进线速度(m/s); 默认0.25(0614实测能走直、高于~0.27履带打滑侧滑临界) -->
+  <arg name="pump_speed"        default="0.4"/>           <!-- 水泵占空(下水吸底, 无推力); 纯建图可设 0 -->
+  <arg name="log_period_sec"    default="1.0"/>           <!-- 行走日志写盘周期(秒); 诊断可 :=0.05 全速记 -->
+  <!-- 注: 直行模式下 wall_align / wall_k_dist / wall_k_par / wall_off_max / corner_* 全部inert(外环+拐角已停用),
+       故本 launch 不设; move_controller 读不到即用代码默认值, 不影响直行。IMU 航向环增益(heading_kp/kd/omega_limit)
+       用代码内 0614 实测默认值(kp=1,kd=1,omega_limit=0.30)。 -->
+
+  <!-- move_controller 整定参数: 必须置"全局"(顶层 <param>), 否则被忽略 -->
+  <param name="wall_follow_enable" value="$(arg wall_follow_enable)"/>
+  <param name="enable_corner"      value="$(arg enable_corner)"/>
+  <param name="speed"              value="$(arg speed)"/>
+  <param name="pump_speed"         value="$(arg pump_speed)"/>
+  <param name="log_period_sec"     value="$(arg log_period_sec)"/>
+
+  <!-- 运动控制器: 提供 /move_controller/move_straight (直行模式) + /move_controller/find_wall(直行不用) -->
+  <node pkg="sonar_slam" type="move_controller_node" name="move_controller_node" output="screen"/>
+
+  <!-- 声呐采集 mapper: 直线走固定距离->停->扫一圈->记文件(main 基线扫描内核), 落智能会话目录; 参数走私有 ~ -->
+  <node pkg="sonar_slam" type="multi_position_sonar_mapper" name="multi_position_sonar_mapper" output="screen">
+    <param name="serial_port"             value="$(arg serial_port)"/>
+    <param name="baudrate"                value="$(arg baudrate)"/>
+    <param name="range_level"             value="$(arg range_level)"/>
+    <param name="phase1/enabled"          value="true"/>
+    <param name="phase1/num_positions"    value="$(arg num_positions)"/>
+    <param name="phase1/move_distance"    value="$(arg move_distance)"/>
+    <param name="phase1/scan_duration"    value="$(arg scan_duration)"/>
+    <param name="phase1/wait_duration"    value="$(arg wait_duration)"/>
+    <param name="phase1/acquire_wall_first" value="$(arg acquire_wall_first)"/>
+    <param name="phase1/acquire_distance" value="$(arg acquire_distance)"/>
+    <param name="enable_stitch"           value="$(arg enable_stitch)"/>
+  </node>
+
+  <!-- 拼图节点(离线后处理, 受 enable_stitch 门控): 订阅 /sonar_scan/session_done -> 对会话目录跑 sonar_stitch.py 两遍
+       -> 出 <session>/stitching_loc.pcd(MIN_INNER=60 定位) + stitching_view.pcd(MIN_INNER=90 显示)
+       -> 发 /sonar_stitch/cloud(RViz, =view 干净图) /sonar_stitch/done。算法=pintu pinjie-auto2 逐字节。
+       需机上装 open3d/scipy/pandas/numpy; 缺依赖会打 ASCII 提示并跳过, 不影响采集。 -->
+  <node if="$(arg enable_stitch)" pkg="sonar_slam" type="sonar_stitch_node.py"
+        name="sonar_stitch_node" output="screen">
+    <param name="stitch_min_inner_loc"  value="$(arg stitch_min_inner_loc)"/>
+    <param name="stitch_min_inner_view" value="$(arg stitch_min_inner_view)"/>
+  </node>
+
+</launch>

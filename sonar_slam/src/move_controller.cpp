@@ -129,8 +129,18 @@ MoveController::MoveController() :
     if (config_speed_max_           < 0.05f) config_speed_max_         = 0.05f;
     if (config_speed_max_           > 0.35f) config_speed_max_         = 0.35f;
 
+    // ===== 直行模式开关 (全局 nh_.param, 构造期读一次) =====
+    // wall_follow_enable=false -> 外环距墙/平行环停用(C 恒 0, 不读超声侧距) + 强制关拐角 -> 纯内环 IMU 航向保持直线前进。
+    // 用于"下水直线前进 + 定点声呐扫描 + 自动建图"流程(沿边运动学困难时的替代)。默认 true=沿边行为不变。
+    nh_.param("wall_follow_enable", config_wall_follow_enable_, true);
+
     // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 (全局 nh_.param, 构造期读一次) =====
     nh_.param("enable_corner",          config_enable_corner_,          true);
+    // 直行模式硬约束: wall_follow_enable=false 时前墙拐角停-转必须关(直行按 move_straight 里程停点判停, 不在前墙停转)。
+    if (!config_wall_follow_enable_) {
+        config_enable_corner_ = false;
+        ROS_WARN("MOVE_CTRL: wall_follow_enable=false -> STRAIGHT mode (outer wall loop OFF, corner OFF, pure IMU heading-hold)");
+    }
     nh_.param("corner_front_trigger_m", config_corner_front_trigger_m_, 1.5f);
     nh_.param("corner_use_wall_dist",   config_corner_use_wall_dist_,   true);   // 前墙触发距离是否跟随 wall_align(默认开: 走够离墙距即停转)
     nh_.param("corner_front_confirm",   config_corner_front_confirm_,   3);
@@ -259,7 +269,8 @@ MoveController::MoveController() :
     if (config_log_period_sec_ > 10.0f) config_log_period_sec_ = 10.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-descent-reacquire-20260629 (off cornergate-20260628; corner TRIGGER=physical DESCENT TEMPLATE FAR/ACQUIRE/DESCEND/CONFIRM + per-sample slew prefilter + monotone-rise streak; far_anchored/B2-drop/in-band/corner_armed/front_floor REMOVED; post-turn front-SUSPEND re-acquire[settle standoff]; kinematic min-advance/leg-fraction gate; point-blank 0.35m unconditional[2-frame]; watchdog kept)");
+    ROS_WARN("MOVE_CTRL_VERSION = straightscan-wallfollowtoggle-20260701 (off descent-reacquire-20260629; ADDS param wall_follow_enable: false=STRAIGHT mode[outer wall loop C=0 + corner OFF -> pure IMU heading-hold, for straight-line sonar scan+map]; true=UNCHANGED wallfollow-descent-reacquire-20260629[descent FAR/ACQUIRE/DESCEND/CONFIRM + post-turn re-acquire + point-blank + watchdog])");
+    ROS_WARN("MOVE_CTRL: wall_follow_enable=%s", config_wall_follow_enable_ ? "true(wall-follow)" : "false(STRAIGHT)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -959,7 +970,8 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             // ---- 外环: 距墙/平行 → 有界航向偏置 C ----
             // C 单位 = rad(等效航向偏置, 叠进航向误差 e_total); K_DIST[rad/m] K_PAR[rad/m]; off_max 0.10≈5.7°(安全上界)。仅新鲜有效超声时刷新。
             float d = -1.0f, e_par = 0.0f, C = 0.0f;
-            if (ultra_ok) {
+            // 直行模式(wall_follow_enable=false): 外环距墙/平行环整体停用, C 恒 0 -> 纯内环 IMU 航向保持(直线前进, 不读超声侧距)。
+            if (config_wall_follow_enable_ && ultra_ok) {
                 d = 0.5f * (front + rear);              // 距右墙
                 e_par = rear - front;                   // >0:机头朝墙(欠转)
                 float e_dist = config_wall_align_ - d;  // >0:离墙太近→需离墙
@@ -971,7 +983,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                     float cr = (float)(ros::Time::now() - ramp_start_time).toSec() / config_softstart_sec_;
                     C *= std::min(1.0f, std::max(0.0f, cr));
                 }
-            } else if (front_valid != rear_valid) {
+            } else if (config_wall_follow_enable_ && (front_valid != rear_valid)) {
                 C = rear_valid ? -0.05f : 0.05f;        // 单侧有墙: 轻偏重捕获(右前丢→右转(-); 右后丢→左转(+)); 全权限不被软启动压制, 尽快回墙
             }
 
@@ -1018,7 +1030,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 current_angular_correction = (float)u;
 
                 // 贴墙时保持 odom 兜底零点新鲜(以当前已对齐航向为零), 以防 IMU 后续掉线退化时航向错
-                if (ultra_ok || (front_valid != rear_valid)) {
+                if (config_wall_follow_enable_ && (ultra_ok || (front_valid != rear_valid))) {
                     total_yaw_change = 0.0f; last_theta = current_pose_.theta;
                 }
 
@@ -1035,7 +1047,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 const float K_ODOM_HOLD = 1.0f;
                 const float MAX_ODOM_CORR = 0.10f;
                 float angular_cmd;
-                if (ultra_ok || (front_valid != rear_valid)) {
+                if (config_wall_follow_enable_ && (ultra_ok || (front_valid != rear_valid))) {
                     angular_cmd = std::max(-(float)config_wall_off_max_,
                                            std::min((float)config_wall_off_max_, C));
                     total_yaw_change = 0.0f; last_theta = current_pose_.theta;  // 贴墙→刷新odom零点

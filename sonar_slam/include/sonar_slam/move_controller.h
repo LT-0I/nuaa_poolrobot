@@ -272,6 +272,7 @@ private:
 
     // ===== P1 隔离 + P2 拐角(停-转-融合航向闭环)参数 =====
     // 全局 nh_.param, 构造期读一次(终端2 裸 rosrun 无 launch → 默认即操作值, 仅【启动前】rosparam set 生效)。
+    bool   config_wall_follow_enable_    = true;   // false=直行模式: 外环距墙/平行环停用(C=0, 不读超声侧距) + 强制 enable_corner=false -> 纯内环 IMU 航向保持直线前进(下水直线扫描建图流程); true=沿边(现状不变)
     bool   config_enable_corner_         = true;   // false=跳过前墙拐角块走纯串级直行(直行段单独整定 + 作回归基线)
     float  config_corner_front_trigger_m_= 1.5f;   // 仅 corner_use_wall_dist=false 时生效的固定前墙触发距离; 默认(true)触发跟随 wall_align
     int    config_corner_front_confirm_  = 3;      // 连续确认帧(>0.05m 近场地板拒噪, 上限内全有效)
