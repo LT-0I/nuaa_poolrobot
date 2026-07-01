@@ -47,9 +47,30 @@
   <arg name="speed"             default="0.25"/>          <!-- 前进线速度(m/s); 默认0.25(0614实测能走直、高于~0.27履带打滑侧滑临界) -->
   <arg name="pump_speed"        default="0.4"/>           <!-- 水泵占空(下水吸底, 无推力); 纯建图可设 0 -->
   <arg name="log_period_sec"    default="1.0"/>           <!-- 行走日志写盘周期(秒); 诊断可 :=0.05 全速记 -->
-  <!-- 注: 直行模式下 wall_align / wall_k_dist / wall_k_par / wall_off_max / corner_* 全部inert(外环+拐角已停用),
-       故本 launch 不设; move_controller 读不到即用代码默认值, 不影响直行。IMU 航向环增益(heading_kp/kd/omega_limit)
-       用代码内 0614 实测默认值(kp=1,kd=1,omega_limit=0.30)。 -->
+  <!-- ===== 直行 IMU 航向环整定 (现场调直线度的主旋钮; 全是 move_controller 全局参数, 改不用重编) =====
+       默认值 = 0614 泳池实测走直好值, 与 a 分支走直/矩形同源同款 IMU 航向 PD + 同一 VCU 驱动映射。
+       现场直接 `roslaunch sonar_slam straight_line_sonar_scan.launch heading_kp:=1.2 heading_kd:=0.8 ...` 即调, 免重编。
+       建议调参顺序: (1) 先 track_bias(驱动侧)治机械平移偏(车总偏一侧) -> (2) heading_kp/kd 治航向抖/软 -> (3) heading_ki 收系统性残余。
+       ⚠ 全局参数残留: 下面 <param> 把 heading_*/speed_max/softstart 写进全局参数服务器, roslaunch 退出不自动清;
+         同一 roscore 先跑本 launch(调过参)再跑 wall_follow_sonar_scan.launch 会串味(尤其 heading_sign 极性)。
+         切 launch 前请【重启 roscore】或知悉残留; wall_follow 侧已补钉 heading_sign 兜底。
+       ⚠ track_bias(治"车总往一边偏"的头号旋钮)是【驱动】参数、不在本 launch —— 在驱动 /cmd_vel 入口施加:
+         track_bias>0 => 右轮 x(1-tb) 减速、左轮 x(1+tb) 加速 => 车向右偏 => 补偿"车总向左偏"。任何发 /cmd_vel 的控制器共享。起驱动时传:
+           roslaunch mars_serial_server serial_server.launch track_bias:=0.1
+           (实测0.1; 语义见 serial_server.launch "右减左增、治总向左偏"; 故【车总偏左则↑、偏右则↓(可进负)】, 范围[-0.30,+0.30]对称)
+         omega_gain(6.4)/motor_scale(230) 同在驱动侧、一般不动。 -->
+  <arg name="heading_kp"          default="1.0"/>   <!-- 航向P增益: 纠偏太软(回正慢/走偏)则↑, 抖动/画龙则↓; 过大->发散画龙(即时可辨、断电即停) -->
+  <arg name="heading_kd"          default="1.0"/>   <!-- 航向D增益(阻尼): 抖/超调↑, 反应迟钝↓ -->
+  <arg name="heading_omega_limit" default="0.30"/>  <!-- 角速度命令饱和上限; 默认0.30已是代码硬顶(夹≤0.3)、只能【下调】降转向权限、上调无效; 一般不动 -->
+  <arg name="heading_ki"          default="0.0"/>   <!-- 航向I增益: 仅有恒定残余偏航(系统性)才少量给; 默认0 -->
+  <arg name="heading_i_clamp"     default="0.05"/>  <!-- 积分限幅(抗饱和); 配合 heading_ki -->
+  <arg name="heading_tau_d"       default="0.2"/>   <!-- D项低通时间常数(秒); IMU噪声大导致D抖→↑更平滑 -->
+  <arg name="heading_yaw_timeout" default="0.5"/>   <!-- /imu_heading 陈旧超时(秒)→退化 odom 守航向; ★安全项:建议[0.3,1.0]; 勿设0/负(永久退odom、失去IMU直行)或过大(抱冻结航向猛冲); 代码暂无夹限 -->
+  <arg name="heading_sign"        default="1"/>     <!-- ★航向负反馈极性: 只填整数 +1 或 -1(下面 param 已锁 type=int); 填反=正反馈会原地打转/跑偏! 默认+1(实测负反馈) -->
+  <arg name="softstart_sec"       default="1.5"/>   <!-- 起步 速度+航向 斜坡(秒): 防起步瞬间侧偏; 起步过猛→↑ -->
+  <arg name="speed_max"           default="0.30"/>  <!-- ★前进安全上限(m/s); 实际速度=min(speed,speed_max), 设 speed 更大也只走到此值; 代码再硬夹≤0.35; >0.27 易履带打滑侧滑, 谨慎↑ -->
+  <!-- 注: 直行模式下 wall_* / corner_* / reacquire_* / findwall_* 全 inert(外环+拐角已停用), 故不设;
+       move_controller 读不到即用代码默认值, 不影响直行。 -->
 
   <!-- move_controller 整定参数: 必须置"全局"(顶层 <param>), 否则被忽略 -->
   <param name="wall_follow_enable" value="$(arg wall_follow_enable)"/>
@@ -57,6 +78,18 @@
   <param name="speed"              value="$(arg speed)"/>
   <param name="pump_speed"         value="$(arg pump_speed)"/>
   <param name="log_period_sec"     value="$(arg log_period_sec)"/>
+  <!-- 直行 IMU 航向环整定 (对应上面同名 arg; 现场 roslaunch ... heading_kp:=1.2 即改, 免重编。
+       构造期只读一次: 须节点起来前生效; 光 `rosparam set` 而不重启节点【不生效】, 须重跑 roslaunch) -->
+  <param name="heading_kp"          value="$(arg heading_kp)"/>
+  <param name="heading_kd"          value="$(arg heading_kd)"/>
+  <param name="heading_omega_limit" value="$(arg heading_omega_limit)"/>
+  <param name="heading_ki"          value="$(arg heading_ki)"/>
+  <param name="heading_i_clamp"     value="$(arg heading_i_clamp)"/>
+  <param name="heading_tau_d"       value="$(arg heading_tau_d)"/>
+  <param name="heading_yaw_timeout" value="$(arg heading_yaw_timeout)"/>
+  <param name="heading_sign"        value="$(arg heading_sign)" type="int"/>
+  <param name="softstart_sec"       value="$(arg softstart_sec)"/>
+  <param name="speed_max"           value="$(arg speed_max)"/>
 
   <!-- 运动控制器: 提供 /move_controller/move_straight (直行模式) + /move_controller/find_wall(直行不用) -->
   <node pkg="sonar_slam" type="move_controller_node" name="move_controller_node" output="screen"/>
