@@ -23,17 +23,17 @@
 
 ## task ↔ 全局图 一一对应（**绝不混用**，混用=错墙）
 - `task_20260629_202646` → `mid_pcd/global.pcd`
-- `task_z` / `task_l` / `task_20260628_223722` → `circle-pcd/global.pcd`
+- `task_z` / `task_l` / `task_20260628_223722(straight2)` → `circle-pcd/global.pcd`
 
 ## Phase 0 验证结论（2026-07-01，详见 `experiments/2026-06-29_locexp/analysis/`）
 用本 vendored 码在复现镜像里跑，对照声呐方随附结果：
 - `task_20260629_202646`(9点/mid_pcd)：`poses_in_map` **逐字节全等**（含分数）。
 - `task_z`(5点)/`task_l`(7点)：**位姿 x/y/yaw 逐字节等**；仅内部 `final_score` 差 ~2e-3（likelihood 打分读数的平台末位，**不影响位姿**）。
 - `corrected_trajectory`：max ~1e-13（纯浮点噪声）。
-- Step1 滤波：`223722` 随附 `filtered_scans` 逐字节等（DBSCAN 跨平台一致）。
-- ⚠ `task_20260628_223722`：其随附 GT 与本码结果差 ~0.2m——该 task GT 大概率用**更早/不同代码**跑（我方 fitness 反更高）；**孤例、非本码问题**，以另 3 组为准或请算法方用现码重生成其 GT。
+- `task_20260628_223722(straight2)`(4点)：**位姿逐字节全等**（首轮旧批 GT 曾差 ~0.2m，已查明系其 GT 用旧代码所跑——非图非本码：旧 GT 的 `filtered_scans` 与本码逐字节等即输入一致、两种图均复现不出旧 GT 且 fitness 落两者之间；算法方用现码重跑 `straight2` 即逐字节全等，旧 `task_20260628_223722` 夹经用户确认已删）。
+- Step1 滤波：DBSCAN 跨平台一致（溯源时以 223722 随附 `filtered_scans` 对照逐字节等）。
 
-**结论：定位结果跨平台 bit-exact 达成，集成正确。**
+**结论：定位结果跨平台 bit-exact 达成（四组全通过），集成正确。**
 
 ## 跑法
 ```bash
