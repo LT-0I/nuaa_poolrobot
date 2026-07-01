@@ -217,7 +217,7 @@ private:
         float e_par;
         float ctrl_C;
         float ctrl_u;
-        int   ctrl_mode;   // 0=无IMU(odom兜底) 1=IMU+超声 2=IMU守航向(丢墙)
+        int   ctrl_mode;   // 0=无IMU(odom兜底) 1=IMU+超声 2=IMU守航向(丢墙/单侧) 3=距墙项淡出(读数偏大)
     };
     std::vector<WalkLogData> log_buffer_;
 
@@ -284,6 +284,15 @@ private:
     float config_findwall_confirm_sec_ = 0.4f;   // 候选位姿【停转后】右两路有效一致+前净空 须持续此时长才锁定(≈4帧@10Hz, 滤ZOH/单帧伪回波)。
     float config_findwall_max_rot_deg_ = 540.0f; // 旋转累计上限(odom角, 1.5圈): 超此仍未锁定→近旁无可用侧壁、判失败(不盲走、由人重放)。
     float config_findwall_timeout_     = 25.0f;  // 找墙阶段墙钟超时(s) 兜底。
+
+    // ===== 数据健康门 + 电机卡死看门狗 (0701 healthgate) =====
+    float config_wall_max_gap_       = 1.0f;   // 距墙项合理性淡出量程(m): d>=wall_align+此值 时距墙项权重淡到0(读数偏大=可能斜入射误读, 少信); ceiling=wall_align+此
+    float config_corner_hard_floor_m_= 0.40f;  // 前墙点抵硬停(m): min(前左,前右)<此=真逼近, 【无条件】触发拐角(补 corner_armed 下锁窗口漏停)
+    int   config_corner_point_blank_confirm_ = 2; // 点抵去抖帧: 连续此帧 <hard_floor 才无条件触发(滤单帧伪回波)
+    int   config_corner_pb_max_      = 3;      // 点抵连发上限: 点抵触发拐角连发超此(前方始终未净空)=原地转-撞-转困死 → 安全停
+    bool  config_stall_enable_       = true;   // 电机卡死看门狗: 命令前进却位姿不动→安全停(0622第3拐角右轮卡死81s无检测)
+    float config_stall_min_speed_    = 0.05f;  // 判"没推进"的位姿速度阈(m/s): 低于此视作未前移(正常沿边~0.17, 0622卡死~0.024; ctor 夹到 <0.3×有效速度)
+    float config_stall_timeout_sec_  = 8.0f;   // 命令前进但位姿速度<阈 持续超此→停车报警(按位姿位移判, 非虚涨里程列)
 
     // 串级调参快照(主循环每拍更新, recordWalkData 1Hz 采样进 CSV)
     float dbg_imu_yaw_deg_  = 0.0f;

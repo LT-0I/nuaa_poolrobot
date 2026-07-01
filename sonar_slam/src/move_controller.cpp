@@ -157,6 +157,39 @@ MoveController::MoveController() :
     if (config_corner_turn_timeout_    < 1.0f)  config_corner_turn_timeout_    = 1.0f;
     if (config_wall_consistency_m_     < 0.05f) config_wall_consistency_m_     = 0.05f;
 
+    // ===== 数据健康门 + 电机卡死看门狗 (0701 healthgate; 全局 nh_.param, 构造期读一次, 启动前 rosparam set /xxx) =====
+    nh_.param("wall_max_gap",               config_wall_max_gap_,               1.0f);
+    nh_.param("corner_hard_floor_m",        config_corner_hard_floor_m_,        0.40f);
+    nh_.param("corner_point_blank_confirm", config_corner_point_blank_confirm_, 2);
+    nh_.param("corner_pb_max",              config_corner_pb_max_,              3);
+    nh_.param("stall_enable",               config_stall_enable_,               true);
+    nh_.param("stall_min_speed",            config_stall_min_speed_,            0.05f);
+    nh_.param("stall_timeout_sec",          config_stall_timeout_sec_,          8.0f);
+    if (config_wall_max_gap_               < 0.05f) config_wall_max_gap_               = 0.05f;  // >0 防 dist_trust 除零(=距墙项淡出量程)
+    if (config_corner_hard_floor_m_       < 0.05f) config_corner_hard_floor_m_       = 0.05f;
+    if (config_corner_point_blank_confirm_ < 1)    config_corner_point_blank_confirm_ = 1;
+    if (config_corner_pb_max_             < 1)     config_corner_pb_max_             = 1;
+    if (config_stall_min_speed_           < 0.0f)  config_stall_min_speed_           = 0.0f;
+    if (config_stall_timeout_sec_         < 1.0f)  config_stall_timeout_sec_         = 1.0f;
+    // 卡死阈须低于减速区地板(0.3×有效速度)留裕度, 防低速现场整定时误触发停(评审 R1)。有效速度=min(speed,speed_max)(实际命令上限, 见 cmd_speed 钳位)。
+    {
+        float eff_speed = std::min(config_speed_, config_speed_max_);
+        if (eff_speed <= 0.001f) {
+            ROS_WARN("effective speed ~0 (speed=%.3f speed_max=%.3f) -> motor-stall watchdog DISABLED", config_speed_, config_speed_max_);
+            config_stall_enable_ = false;
+        } else if (config_stall_min_speed_ >= 0.3f * eff_speed) {
+            float safe = 0.5f * 0.3f * eff_speed;
+            ROS_WARN("stall_min_speed %.3f >= 0.3*eff_speed(%.3f) -> lowered to %.3f (keep margin below slow-zone floor)",
+                     config_stall_min_speed_, eff_speed, safe);
+            config_stall_min_speed_ = safe;
+        }
+    }
+    // 距墙项淡出天花板 ceiling=wall_align+wall_max_gap 若超侧超声量程 5.0m, 则 d 永远<ceiling → dist_trust 永>0 → 距墙项淡不到底(H1 保护被削弱)。仅告警不改值(wall_align 是用户目标距, 评审 R3 LOW)。
+    if (config_wall_align_ + config_wall_max_gap_ > 5.0f) {
+        ROS_WARN("ceiling(wall_align+wall_max_gap)=%.2f > sonar range 5.0m -> dist-term fade never fully engages (H1 protection weakened); lower wall_align or wall_max_gap",
+                 config_wall_align_ + config_wall_max_gap_);
+    }
+
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 启动前 rosparam set /xxx) =====
     nh_.param("findwall_omega",       config_findwall_omega_,       0.18f);
     nh_.param("findwall_turn_left",   config_findwall_turn_left_,   true);
@@ -173,7 +206,7 @@ MoveController::MoveController() :
     if (config_findwall_timeout_     > 120.0f)  config_findwall_timeout_     = 120.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-cascade-findwall-frontclear-fix-wa2m-20260622 (wall_align default 2.0m; corner trigger follows wall_align; findwall front-clear uses SAME trig as corner so acquire hands off without spurious turn; per-run log to $HOME/sonar_logs/move_logs)");
+    ROS_WARN("MOVE_CTRL_VERSION = wallfollow-healthgate-20260701c (off 0622 a32269f; side-ultra dist-term authority FADES with implausibility[wall_max_gap], parallel term full[self-heals incidence, stateless]; corner=min()<trig[0622] + unconditional point-blank floor + spin-cap; motor-stall watchdog; inner/outer gains all launch args; per-run log to $HOME/sonar_logs/move_logs)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
     ROS_INFO("  wall outer: k_dist=%.3f k_par=%.3f off_max=%.3f | speed_max=%.2f softstart=%.2f consistency=%.2f",
@@ -182,6 +215,10 @@ MoveController::MoveController() :
              (int)config_enable_corner_, config_corner_front_trigger_m_, config_corner_front_confirm_, config_corner_settle_sec_,
              config_corner_turn_deg_, config_corner_turn_omega_, config_corner_turn_omega_fine_, config_corner_slow_deg_,
              config_corner_turn_cap_deg_, config_corner_turn_timeout_);
+    ROS_INFO("  healthgate(0701): wall_max_gap=%.2fm(dist-fade->0 at ceiling=%.2f) | hard_floor=%.2fm pb_confirm=%d pb_max=%d | stall en=%d min_speed=%.3f timeout=%.1fs",
+             config_wall_max_gap_, config_wall_align_ + config_wall_max_gap_,
+             config_corner_hard_floor_m_, config_corner_point_blank_confirm_, config_corner_pb_max_,
+             (int)config_stall_enable_, config_stall_min_speed_, config_stall_timeout_sec_);
     ROS_INFO("  findwall(bootstrap): omega=%.2f turn_left=%d confirm=%.2fs max_rot=%.0fdeg timeout=%.1fs | acquire: right both valid & |rear-front|<%.2fm & front>=%.2fm(eff; =wall_align when corner_use_wall_dist)",
              config_findwall_omega_, (int)config_findwall_turn_left_, config_findwall_confirm_sec_,
              config_findwall_max_rot_deg_, config_findwall_timeout_, config_wall_consistency_m_,
@@ -360,6 +397,12 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     ros::Time last_correction_time = ros::Time::now();
     float current_angular_correction = 0.0f;
 
+    // 0701 拐角点抵去抖计数 + 点抵连发计数(困死检测) + 电机卡死看门狗位姿/时刻基准
+    int point_blank_count = 0;      // 前墙点抵连续命中帧(去抖)
+    int pb_consecutive = 0;         // 点抵触发拐角的连发次数(前方一净空即清; 连发不清=原地转-撞-转困死)
+    geometry_msgs::Pose2D stall_ref_pose = start_pose;
+    ros::Time stall_ref_time = start_time;
+
     // 串级直行: 锁定 IMU 航向基准 yaw_base(=当前/imu_heading; 段首与每次拐角对齐后重锁) + 复位内环 PD
     // 段首先等 IMU 首帧再锁(最多1s), 防首帧晚到把基准锁成绝对航向 0.0 → 大初始误差饱和打舵(评审 HIGH)。
     // IMU 在跑时首帧 <50ms 即到、几乎不停留; 等不到(老驱动无/imu_heading)则降级, 主循环内首个新鲜帧到达时"懒锁"。
@@ -419,6 +462,26 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
 
         recordWalkData(total_accumulated_distance, total_target);
 
+        // ==================== 电机卡死看门狗(0701): 命令前进却位姿不推进 → 安全停 ====================
+        // 治 0622 第3拐角右轮卡死(速度坍到~0.024m/s, ctrl_u 顶饱和, 81s 无检测)。按【位姿位移】判, 不信卡死后虚涨的里程列。
+        // 仅在真正命令前进(非拐角避让)时判; 拐角内另有独立停转看门狗。有推进/拐角后刷新基准, 正常沿边~0.17m/s 远>阈不误触。
+        if (config_stall_enable_ && !wall_avoiding && move_direction == 'w') {
+            float sdx = current_pose_.x - stall_ref_pose.x;
+            float sdy = current_pose_.y - stall_ref_pose.y;
+            float smoved = sqrt(sdx*sdx + sdy*sdy);
+            float swin = (ros::Time::now() - stall_ref_time).toSec();
+            if (smoved > config_stall_min_speed_ * swin) {
+                stall_ref_pose = current_pose_;              // 有推进 → 刷新基准(高水位)
+                stall_ref_time = ros::Time::now();
+            } else if (swin > config_stall_timeout_sec_) {
+                ROS_ERROR("[stall] commanded forward but pose speed < %.3f m/s for %.1fs (motor/wheel stall?) -> STOP",
+                          config_stall_min_speed_, config_stall_timeout_sec_);
+                stop();
+                success = false;
+                break;
+            }
+        }
+
         // ==================== 前墙拐角: 停-转-融合航向闭环 (P2) ====================
         // enable_corner=false → 整块跳过, 走纯串级直行(直行段单独整定 / 回归基线)。
         // 触发: 前超声 data0(前左)/data1(前右) min < corner_trig(默认跟随 wall_align: 走够离墙距即停转; 否则独立 corner_front_trigger_m) 连续 confirm 帧。
@@ -432,18 +495,31 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 front_right_dist = wall_sensors_.infra_front_right;
             }
             float front_dist = std::min(front_left_dist, front_right_dist);
-            // 地板取有效量程下限 0.05(而非 0.3): 近场 [0.05,0.3) 也判有墙, 防机器人已逼到 <0.3m 时落进盲带漏触发撞墙
-            // (无效/无回波在 ultraCallback 已兜成 999 > trigger, 自然排除)。评审 PARTIAL 安全项。
             // 前墙触发距离: corner_use_wall_dist=true 时跟随 wall_align(走够离墙距即停转, 用户指定逻辑); 否则用独立 corner_front_trigger_m
             float corner_trig = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
+            // 触发用 min(前左,前右)(与0622一致): 本车"偏出法向→读数异常大→OOR", 坏通道读数偏大, min() 天然取更真的近通道 → 对本车误读模式稳健、不误拐; 无回波已兜 999>trig 自然排除。
             bool has_front_wall = (front_dist > 0.05f && front_dist < corner_trig);
+            // 0701 点抵硬停兜底(评审 R1 修): min(前左,前右) 逼到 hard_floor 内且连续 point_blank_confirm 帧 = 真撞墙风险,
+            //   【无条件】触发(不受 corner_armed 约束)——补 corner_armed 下锁窗口(欠转后老前墙仍在)漏停撞墙的洞; 去抖防单帧伪回波。
+            bool point_blank = (front_dist > 0.05f && front_dist < config_corner_hard_floor_m_);
+            if (point_blank) { point_blank_count++; } else { point_blank_count = 0; }
+            bool pb_fire = (point_blank_count >= config_corner_point_blank_confirm_);
 
             if (!has_front_wall) {
                 front_wall_detect_count = 0;
                 corner_armed = true;   // 前方净空 -> 重新武装
-            } else if (corner_armed && ++front_wall_detect_count >= config_corner_front_confirm_) {
+                pb_consecutive = 0;    // 前方真净空=已脱离前墙(有前进进展) → 清点抵连发计数
+            } else if ((corner_armed && ++front_wall_detect_count >= config_corner_front_confirm_) || pb_fire) {
+                // 点抵困死检测(评审 R1 MEDIUM): pb_fire 无视 corner_armed 且卡死看门狗每拐角复位→死角/窄兜里可能原地"转-仍撞-再转"循环绕过两道网、只被主超时兜住。
+                //   每次点抵触发计一次连发, 前方一净空即清(上面); 连发超上限=判定困住, 直接安全停(不再空转到主超时)。
+                if (pb_fire && ++pb_consecutive > config_corner_pb_max_) {
+                    ROS_ERROR("[corner] point-blank fired %d times without clearing front -> trapped/spin, STOP", pb_consecutive);
+                    stop();
+                    success = false;
+                    break;
+                }
                 corner_armed = false;  // 触发即下锁; 须前方重新净空才再武装(评审D MAJOR: 防转向欠转后老前墙仍<trig时立即重触发->累计U转)
-                ROS_WARN("[corner] front wall %.2fm (confirm %d) -> STOP-and-turn", front_dist, front_wall_detect_count);
+                ROS_WARN("[corner] front wall %.2fm (confirm %d%s) -> STOP-and-turn", front_dist, front_wall_detect_count, pb_fire ? " POINT-BLANK" : "");
                 wall_avoiding = true;
 
                 // ---------- SETTLE: 20Hz 持续发零运动(泵保持)停稳取入航向, 喂看门狗(替换原盲 sleep) ----------
@@ -589,6 +665,8 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 ramp_start_time = ros::Time::now();   // 速度 + 外环 C 双软启动重置
                 front_wall_detect_count = 0;
                 wall_avoiding = false;
+                stall_ref_pose = current_pose_; stall_ref_time = ros::Time::now();  // 拐角后重置卡死基准(转向期机身未前移)
+                point_blank_count = 0;  // 拐角后重置点抵去抖(新墙重新判); pb_consecutive 不在此清——须前方真净空(!has_front_wall)才清, 否则原地转-撞-转困死检测失效
                 // corner_armed 此处刻意不复位: 转向欠转时老前墙仍<trig, 须靠上方 !has_front_wall 数据驱动重新武装(勿在此加 =true 否则重开欠转 U 转洞)
 
                 // 恢复前进速度
@@ -659,6 +737,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 rear  = wall_sensors_.ultra_right_rear;
                 ultra_stamp = ultra_right_stamp_;
             }
+            // 0701 侧超声数据有效性(与0622一致): 量程/新鲜/一致三门; 距墙项的"合理性淡出"下移到 C 计算处(不动有效性判定, 保留单侧捕获/丢墙原逻辑)。
             bool front_valid = (front > 0.05f && front < 5.0f);
             bool rear_valid  = (rear  > 0.05f && rear  < 5.0f);
             bool ultra_fresh = (!ultra_stamp.isZero() &&
@@ -671,12 +750,19 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
 
             // ---- 外环: 距墙/平行 → 有界航向偏置 C ----
             // C 单位 = rad(等效航向偏置, 叠进航向误差 e_total); K_DIST[rad/m] K_PAR[rad/m]; off_max 0.10≈5.7°(安全上界)。仅新鲜有效超声时刷新。
-            float d = -1.0f, e_par = 0.0f, C = 0.0f;
+            float d = -1.0f, e_par = 0.0f, C = 0.0f, dist_trust = 1.0f;
             if (ultra_ok) {
                 d = 0.5f * (front + rear);              // 距右墙
                 e_par = rear - front;                   // >0:机头朝墙(欠转)
                 float e_dist = config_wall_align_ - d;  // >0:离墙太近→需离墙
-                C = (float)config_wall_k_dist_ * e_dist + (float)config_wall_k_par_ * e_par;
+                // 0701 距墙项按"读数合理性"淡出(核心, 治偏>10°侧超声异常变大→假"太远"→C顶满往墙里别→越别越偏崩):
+                //   dist_trust: d<=wall_align 时=1(太近时全权离墙, 安全侧绝不打折); d 越超 wall_align 越淡; 到 ceiling=wall_align+max_gap 归0。
+                //   平行项 e_par=右后-右前 是【差分】(共模的斜入射膨胀相消)→始终全权保留: 主动把机头纠回平行→入射角回正→超声自愈(不靠被动hold, 故无死锁/off-parallel也能纠)。
+                //   => 假大读数只被"淡出的距墙项"轻推、且被"全权平行项"主动纠回; 真远且平行(e_par~0)时距墙项淡出+平行项~0=稳态跟平行(逼近范围靠 max_gap 现场调)。
+                dist_trust = (config_wall_align_ + config_wall_max_gap_ - d) / config_wall_max_gap_;
+                if (dist_trust < 0.0f) dist_trust = 0.0f;
+                if (dist_trust > 1.0f) dist_trust = 1.0f;
+                C = (float)config_wall_k_dist_ * e_dist * dist_trust + (float)config_wall_k_par_ * e_par;
                 C = std::max(-(float)config_wall_off_max_, std::min((float)config_wall_off_max_, C));
                 // 外环软启动(评审 BLOCKER): 起步/拐角后 softstart_sec 内把【双侧距墙/平行】外环权限 0→full 渐入,
                 // 治"起步距墙误差大→C 瞬间钉满 off_max 叠加 omega_limit=0.30 打舵"。只软此双侧 C, 不软单侧捕获(评审 MEDIUM)、不动内环 PD(Q3 已验)。
@@ -684,6 +770,9 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                     float cr = (float)(ros::Time::now() - ramp_start_time).toSec() / config_softstart_sec_;
                     C *= std::min(1.0f, std::max(0.0f, cr));
                 }
+                if (dist_trust < 0.9f) ROS_WARN_THROTTLE(1.0,
+                    "[healthgate] side d=%.2fm > plausible (ceiling=%.2f) -> dist-authority faded to %.2f (parallel still full, re-aligning)",
+                    d, config_wall_align_ + config_wall_max_gap_, dist_trust);
             } else if (front_valid != rear_valid) {
                 C = rear_valid ? -0.05f : 0.05f;        // 单侧有墙: 轻偏重捕获(右前丢→右转(-); 右后丢→左转(+)); 全权限不被软启动压制, 尽快回墙
             }
@@ -739,7 +828,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 dbg_yaw_base_deg_ = (float)(yaw_base * RAD_TO_DEG);
                 dbg_e_head_deg_   = (float)(e_head * RAD_TO_DEG);
                 dbg_wall_d_ = d; dbg_e_par_ = e_par; dbg_C_ = C; dbg_u_ = (float)u;
-                dbg_mode_ = ultra_ok ? 1 : 2;
+                dbg_mode_ = ultra_ok ? (dist_trust < 0.9f ? 3 : 1) : 2;   // 1=全外环 3=距墙项淡出(读数偏大) 2=弃外环纯IMU/单侧
 //                ROS_INFO_THROTTLE(1.0,
 //                    "沿墙(串级): d=%.2f e_par=%.3f C=%.3f | imu_e=%.1fdeg u=%.3f mode=%d",
 //                    d, e_par, C, dbg_e_head_deg_, dbg_u_, dbg_mode_);

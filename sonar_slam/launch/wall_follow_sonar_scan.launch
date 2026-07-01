@@ -45,6 +45,40 @@
   <arg name="corner_use_wall_dist" default="true"/>      <!-- 前墙触发距离跟随 wall_align(走够离墙距即停转) [step2] -->
   <arg name="enable_corner"     default="true"/>          <!-- 绕角停-转总开关; 须显式钉住: move_controller 构造期读全局 /enable_corner, 不钉会吃 rosmaster 残留(如 §1 单测设过 false 未重启) -->
 
+  <!-- ===== 内环 IMU 航向 PD + 外环补充 + 数据健康门 + 拐角 + 卡死看门狗 (0701 全部暴露; 默认=0622实测起点, 现场整定) ===== -->
+  <!-- 内环(IMU航向PD): 0614实测直行好的值作起点; 现场按 CSV(e_head/u) 整定 -->
+  <arg name="heading_kp"           default="1.0"/>          <!-- 航向P -->
+  <arg name="heading_kd"           default="1.0"/>          <!-- 航向D(对tau_d低通后的航向速率) -->
+  <arg name="heading_ki"           default="0.0"/>          <!-- 航向I(默认关; 有稳态偏航再加) -->
+  <arg name="heading_i_clamp"      default="0.05"/>         <!-- I 积分限幅 -->
+  <arg name="heading_omega_limit"  default="0.30"/>         <!-- 总角速度命令限幅(cmd; ×6.4=rad/s) -->
+  <arg name="heading_tau_d"        default="0.2"/>          <!-- 航向微分低通时间常数(s) -->
+  <arg name="heading_yaw_timeout"  default="0.5"/>          <!-- /imu_heading 陈旧阈值(s) -->
+  <arg name="heading_sign"         default="1"/>            <!-- 航向误差极性(0614实测+1=负反馈); 改前必确认符号 -->
+  <!-- 外环(距墙/平行)补充 + 速度安全 -->
+  <arg name="wall_stale_sec"       default="0.5"/>          <!-- 右侧超声陈旧看门狗(s) -->
+  <arg name="wall_consistency_m"   default="0.5"/>          <!-- 右前/右后一致门(m); 超此弃外环纯IMU守航向 -->
+  <arg name="speed_max"            default="0.30"/>         <!-- 前进速度安全上限(防打滑临界~0.27) -->
+  <arg name="softstart_sec"        default="1.5"/>          <!-- 起步/拐角后 速度+外环C 软启动(s) -->
+  <!-- 数据健康门(0701核心): 治偏>10°侧超声"异常增大→OOR"误读区 → 距墙项按合理性淡出, 平行项全权自愈(无状态) -->
+  <arg name="wall_max_gap"         default="1.0"/>          <!-- 距墙项淡出量程(m): d>=wall_align+此 距墙项权重=0; ceiling=wall_align+此; 越小越早淡出越保守 -->
+  <!-- 拐角(停-转-融合航向闭环) 整定 -->
+  <arg name="corner_hard_floor_m"  default="0.40"/>         <!-- 前墙点抵无条件硬停(m)兜底真逼近(补corner_armed下锁窗口) -->
+  <arg name="corner_point_blank_confirm" default="2"/>      <!-- 点抵去抖帧: 连续此帧<hard_floor才无条件触发 -->
+  <arg name="corner_pb_max"        default="3"/>            <!-- 点抵连发上限: 超此(前方始终未净空)=困死→安全停 -->
+  <arg name="corner_front_confirm" default="3"/>            <!-- 前墙连续确认帧 -->
+  <arg name="corner_settle_sec"    default="1.0"/>          <!-- 触发后停稳取航向时长(s) -->
+  <arg name="corner_turn_deg"      default="90"/>           <!-- 闭环左转目标角(deg) -->
+  <arg name="corner_turn_omega"    default="0.2"/>          <!-- 粗转角速度(cmd) -->
+  <arg name="corner_turn_omega_fine" default="0.10"/>       <!-- 近目标降速(cmd; 水下过低会停在~88°) -->
+  <arg name="corner_slow_deg"      default="15"/>           <!-- 距目标此角内降fine -->
+  <arg name="corner_turn_timeout"  default="8.0"/>          <!-- 转向硬超时(s) -->
+  <arg name="corner_turn_cap_deg"  default="130"/>          <!-- odom过转兜底上限(deg) -->
+  <!-- 电机卡死看门狗(0701): 命令前进却位姿不动→安全停(治0622右轮卡死81s无检测) -->
+  <arg name="stall_enable"         default="true"/>         <!-- 总开关 -->
+  <arg name="stall_min_speed"      default="0.05"/>         <!-- 位姿速度阈(m/s)判"没推进"(正常~0.17,卡死~0.024) -->
+  <arg name="stall_timeout_sec"    default="8.0"/>          <!-- 低于阈持续超此→停(s) -->
+
   <!-- move_controller 整定参数: 必须置"全局"(顶层 <param>), 否则被忽略(见上方命名空间注意) -->
   <param name="wall_align"           value="$(arg wall_align)"/>
   <param name="wall_k_dist"          value="$(arg wall_k_dist)"/>
@@ -54,6 +88,34 @@
   <param name="pump_speed"           value="$(arg pump_speed)"/>
   <param name="corner_use_wall_dist" value="$(arg corner_use_wall_dist)"/>
   <param name="enable_corner"        value="$(arg enable_corner)"/>
+  <!-- 0701 新增: 内环PD + 外环补充 + 健康门 + 拐角 + 卡死 全部全局 <param> -->
+  <param name="heading_kp"           value="$(arg heading_kp)"/>
+  <param name="heading_kd"           value="$(arg heading_kd)"/>
+  <param name="heading_ki"           value="$(arg heading_ki)"/>
+  <param name="heading_i_clamp"      value="$(arg heading_i_clamp)"/>
+  <param name="heading_omega_limit"  value="$(arg heading_omega_limit)"/>
+  <param name="heading_tau_d"        value="$(arg heading_tau_d)"/>
+  <param name="heading_yaw_timeout"  value="$(arg heading_yaw_timeout)"/>
+  <param name="heading_sign"         value="$(arg heading_sign)"/>
+  <param name="wall_stale_sec"       value="$(arg wall_stale_sec)"/>
+  <param name="wall_consistency_m"   value="$(arg wall_consistency_m)"/>
+  <param name="speed_max"            value="$(arg speed_max)"/>
+  <param name="softstart_sec"        value="$(arg softstart_sec)"/>
+  <param name="wall_max_gap"         value="$(arg wall_max_gap)"/>
+  <param name="corner_hard_floor_m"  value="$(arg corner_hard_floor_m)"/>
+  <param name="corner_point_blank_confirm" value="$(arg corner_point_blank_confirm)"/>
+  <param name="corner_pb_max"        value="$(arg corner_pb_max)"/>
+  <param name="corner_front_confirm" value="$(arg corner_front_confirm)"/>
+  <param name="corner_settle_sec"    value="$(arg corner_settle_sec)"/>
+  <param name="corner_turn_deg"      value="$(arg corner_turn_deg)"/>
+  <param name="corner_turn_omega"    value="$(arg corner_turn_omega)"/>
+  <param name="corner_turn_omega_fine" value="$(arg corner_turn_omega_fine)"/>
+  <param name="corner_slow_deg"      value="$(arg corner_slow_deg)"/>
+  <param name="corner_turn_timeout"  value="$(arg corner_turn_timeout)"/>
+  <param name="corner_turn_cap_deg"  value="$(arg corner_turn_cap_deg)"/>
+  <param name="stall_enable"         value="$(arg stall_enable)"/>
+  <param name="stall_min_speed"      value="$(arg stall_min_speed)"/>
+  <param name="stall_timeout_sec"    value="$(arg stall_timeout_sec)"/>
 
   <!-- 沿边控制器: 提供 /move_controller/move_straight + /move_controller/find_wall (读上方全局参数) -->
   <node pkg="sonar_slam" type="move_controller_node" name="move_controller_node" output="screen"/>
