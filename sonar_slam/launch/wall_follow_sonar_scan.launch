@@ -45,6 +45,7 @@
   <arg name="speed"             default="0.25"/>          <!-- 沿边前进线速度(m/s) [step1] -->
   <arg name="pump_speed"        default="0.4"/>           <!-- 水泵占空(下水推进) [step1] -->
   <arg name="corner_use_wall_dist" default="true"/>      <!-- 前墙触发距离跟随 wall_align(走够离墙距即停转) [step2] -->
+  <arg name="wall_follow_enable" default="true"/>          <!-- ★沿边/直行模式总开关; 必须显式钉 true 兜底: 防吃 straight_line_sonar_scan.launch 残留的全局 /wall_follow_enable=false (否则本沿边会话静默变直行 -> 外环C=0+强制关拐角/避撞/前超声看门狗 -> 预期有墙却直冲池壁!); 默认 true=沿边=代码默认, 零行为变更 -->
   <arg name="enable_corner"     default="true"/>          <!-- 绕角停-转总开关; 须显式钉住: move_controller 构造期读全局 /enable_corner, 不钉会吃 rosmaster 残留(如 §1 单测设过 false 未重启) -->
   <arg name="heading_sign"      default="1"/>             <!-- ★航向负反馈极性(整数±1); 显式钉住=防吃 straight_line_sonar_scan.launch 残留在全局 /heading_sign 的值(极性串味=正反馈会跑飞); 默认+1=沿边/直行同款实测值, 零行为变更 -->
   <arg name="log_period_sec"    default="1.0"/>           <!-- 行走日志写盘周期(秒): 默认1.0=原~1Hz; 诊断 log_period_sec:=0.05=20Hz 全速记(定位拐角触发帧)。仅落盘节流、不碰控制。⚠20Hz轨迹缓存到收尾才落盘, 中途断电丢 -> 同时跑 ultra_logger.py 旁路兜抗断电原始 -->
@@ -57,6 +58,7 @@
   <param name="speed"                value="$(arg speed)"/>
   <param name="pump_speed"           value="$(arg pump_speed)"/>
   <param name="corner_use_wall_dist" value="$(arg corner_use_wall_dist)"/>
+  <param name="wall_follow_enable"   value="$(arg wall_follow_enable)"/>   <!-- 兜底防吃直行 launch 残留 /wall_follow_enable=false; 钉默认 true=沿边, 零行为变更 -->
   <param name="enable_corner"        value="$(arg enable_corner)"/>
   <param name="heading_sign"         value="$(arg heading_sign)" type="int"/>   <!-- 兜底防吃直行 launch 残留极性; 钉默认+1 零行为变更 -->
   <param name="log_period_sec"       value="$(arg log_period_sec)"/>

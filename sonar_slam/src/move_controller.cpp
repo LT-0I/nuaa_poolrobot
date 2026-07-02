@@ -124,6 +124,8 @@ MoveController::MoveController() :
     if (config_heading_omega_limit_ < 0.0) config_heading_omega_limit_ = 0.0;
     if (config_heading_omega_limit_ > 0.3) config_heading_omega_limit_ = 0.3;
     if (config_heading_tau_d_       < 0.02) config_heading_tau_d_      = 0.02;
+    if (config_heading_yaw_timeout_ < 0.1) config_heading_yaw_timeout_ = 0.1;   // IMU陈旧超时夹限[0.1,5.0]: 防误设0/负(永久退odom、失去IMU直行)或过大(抱冻结航向猛冲)
+    if (config_heading_yaw_timeout_ > 5.0) config_heading_yaw_timeout_ = 5.0;
     if (config_wall_off_max_        < 0.0) config_wall_off_max_        = 0.0;
     if (config_wall_off_max_        > 0.3) config_wall_off_max_        = 0.3;
     if (config_speed_max_           < 0.05f) config_speed_max_         = 0.05f;
@@ -269,7 +271,7 @@ MoveController::MoveController() :
     if (config_log_period_sec_ > 10.0f) config_log_period_sec_ = 10.0f;
 
     // 版本闸门: ASCII 横幅, 操作单 grep 自判是否在跑新二进制(防跑旧编译)
-    ROS_WARN("MOVE_CTRL_VERSION = straightscan-wallfollowtoggle-20260701 (off descent-reacquire-20260629; ADDS param wall_follow_enable: false=STRAIGHT mode[outer wall loop C=0 + corner OFF -> pure IMU heading-hold, for straight-line sonar scan+map]; true=UNCHANGED wallfollow-descent-reacquire-20260629[descent FAR/ACQUIRE/DESCEND/CONFIRM + post-turn re-acquire + point-blank + watchdog])");
+    ROS_WARN("MOVE_CTRL_VERSION = straightscan-guards-20260701 (off descent-reacquire-20260629; param wall_follow_enable: false=STRAIGHT mode[outer wall loop C=0 + corner OFF -> pure IMU heading-hold, for straight-line sonar scan+map]; true=UNCHANGED wallfollow-descent-reacquire-20260629; STRAIGHT-mode guards: find_wall service rejected + heading_yaw_timeout clamp[0.1,5.0] + dbg_mode=3 tag for straight logs)");
     ROS_WARN("MOVE_CTRL: wall_follow_enable=%s", config_wall_follow_enable_ ? "true(wall-follow)" : "false(STRAIGHT)");
     ROS_INFO("  cascade params: heading_kp=%.2f kd=%.2f ki=%.2f omega_limit=%.2f sign=%d",
              config_heading_kp_, config_heading_kd_, config_heading_ki_, config_heading_omega_limit_, config_heading_sign_);
@@ -360,6 +362,16 @@ bool MoveController::moveStraightCallback(sonar_slam::MoveStraight::Request& req
 // ==================== 服务回调: 下水自启找侧壁 ====================
 bool MoveController::findWallCallback(sonar_slam::MoveStraight::Request& req,
                                       sonar_slam::MoveStraight::Response& res) {
+    // 直行模式(wall_follow_enable=false)下拒绝找墙: 找墙对齐成功会交接进 walkStraight 长距离沿边,
+    // 但直行模式外环 C=0 / 拐角关 / 无前向保护 -> "对齐了墙却无视墙直走"语义矛盾且不安全 -> 直接拒绝。
+    if (!config_wall_follow_enable_) {
+        res.success = false;
+        res.message = "find_wall rejected: STRAIGHT mode (wall_follow_enable=false)";
+        res.actual_distance = 0.0f;
+        res.final_error = 0.0f;
+        ROS_WARN("[findwall] REJECTED: wall_follow_enable=false (STRAIGHT mode), find_wall not applicable");
+        return true;
+    }
     // 复用 MoveStraight 服务类型: distance=找到墙对齐后沿边行走距离(默认 50m≈绕池足够), timeout=沿边阶段超时。
     // 找墙旋转阶段另由 findwall_* 参数约束(见构造函数)。
     float ftimeout = (req.timeout > 0) ? req.timeout : 60.0f;
@@ -1038,7 +1050,7 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
                 dbg_yaw_base_deg_ = (float)(yaw_base * RAD_TO_DEG);
                 dbg_e_head_deg_   = (float)(e_head * RAD_TO_DEG);
                 dbg_wall_d_ = d; dbg_e_par_ = e_par; dbg_C_ = C; dbg_u_ = (float)u;
-                dbg_mode_ = ultra_ok ? 1 : 2;
+                dbg_mode_ = (!config_wall_follow_enable_) ? 3 : (ultra_ok ? 1 : 2);  // 3=直行(外环C=0纯IMU,侧超声不参与控制); 1=沿边墙外环有效; 2=沿边超声失效退纯IMU
 //                ROS_INFO_THROTTLE(1.0,
 //                    "沿墙(串级): d=%.2f e_par=%.3f C=%.3f | imu_e=%.1fdeg u=%.3f mode=%d",
 //                    d, e_par, C, dbg_e_head_deg_, dbg_u_, dbg_mode_);

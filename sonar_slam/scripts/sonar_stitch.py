@@ -23,7 +23,7 @@ sonar_stitch.py - 声呐子图离线拼接 (ICP)
 # main() 跑两遍, 其余 7 个通用滤波参数可经 ~stitch_* 覆盖, MIN_INNER 两档经 ~stitch_min_inner_loc / ~stitch_min_inner_view。
 # 20260701: main() 增补 points_index 格式适配块(照搬 pinjie-auto2.py)——手动采集(point_id 列)也可拼;
 #   自动采集(sonar_odom_log.csv 有 pose_* 列、无 point_id)为 no-op、拼接算法与产物逐字不变。
-STITCH_VERSION = "sonar-stitch-pointsindex-adapter-20260701"
+STITCH_VERSION = "sonar-stitch-pointsindex-guard-20260701"
 
 import open3d as o3d
 import numpy as np
@@ -642,6 +642,12 @@ def main():
     # 守卫式: 自动采集的 sonar_odom_log.csv 已含 pose_* 列且无 point_id -> 本块 no-op, 自动管线行为不变。
     if 'point_id' in df_odom.columns:
         print(">> points_index-format odom detected: mapping fields + yaw rad->deg")
+        _need_cols = ['x_at_scan', 'y_at_scan', 'yaw_at_scan', 'deliverable_basename']
+        _miss_cols = [c for c in _need_cols if c not in df_odom.columns]
+        if _miss_cols:
+            print(">> ERROR: points_index-format but missing columns: %s" % _miss_cols)
+            print(">> columns present: %s" % list(df_odom.columns))
+            return
         df_odom['position']        = df_odom['point_id']
         df_odom['pose_x']          = df_odom['x_at_scan']
         df_odom['pose_y']          = df_odom['y_at_scan']
