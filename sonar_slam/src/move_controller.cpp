@@ -189,6 +189,17 @@ MoveController::MoveController() :
         ROS_WARN("ceiling(wall_align+wall_max_gap)=%.2f > sonar range 5.0m -> dist-term fade never fully engages (H1 protection weakened); lower wall_align or wall_max_gap",
                  config_wall_align_ + config_wall_max_gap_);
     }
+    // 点抵地板须显著<前墙触发距, 否则 point_blank 不再是 has_front_wall 子集 → 触发/退抖退化(评审 R4 L2)
+    {
+        float corner_trig_eff = config_corner_use_wall_dist_ ? config_wall_align_ : config_corner_front_trigger_m_;
+        if (config_corner_hard_floor_m_ > 0.5f * corner_trig_eff) {
+            config_corner_hard_floor_m_ = 0.5f * corner_trig_eff;
+            ROS_WARN("corner_hard_floor_m too high vs front trigger(%.2f) -> clamped to %.2f", corner_trig_eff, config_corner_hard_floor_m_);
+        }
+    }
+    // 卡死阈=0 会让任何位移都刷新基准 → 看门狗形同关闭, 告警(评审 R4 N1)
+    if (config_stall_enable_ && config_stall_min_speed_ <= 0.0001f)
+        ROS_WARN("stall_min_speed ~0 -> motor-stall watchdog ineffective (any pose motion refreshes)");
 
     // ===== 下水自启找侧壁(bootstrap) 参数 (全局 nh_.param, 启动前 rosparam set /xxx) =====
     nh_.param("findwall_omega",       config_findwall_omega_,       0.18f);
@@ -397,9 +408,10 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
     ros::Time last_correction_time = ros::Time::now();
     float current_angular_correction = 0.0f;
 
-    // 0701 拐角点抵去抖计数 + 点抵连发计数(困死检测) + 电机卡死看门狗位姿/时刻基准
+    // 0701 拐角点抵去抖计数 + 点抵连发计数(困死检测) + 净空连续帧 + 电机卡死看门狗位姿/时刻基准
     int point_blank_count = 0;      // 前墙点抵连续命中帧(去抖)
-    int pb_consecutive = 0;         // 点抵触发拐角的连发次数(前方一净空即清; 连发不清=原地转-撞-转困死)
+    int pb_consecutive = 0;         // 点抵触发拐角的连发次数(连续净空 confirm 帧才清; 连发不清=原地转-撞-转困死)
+    int front_clear_count = 0;      // 前方连续净空帧(评审R4 L1: 须连续净空才清 pb_consecutive, 防单帧 999 dropout 误清)
     geometry_msgs::Pose2D stall_ref_pose = start_pose;
     ros::Time stall_ref_time = start_time;
 
@@ -462,23 +474,33 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
 
         recordWalkData(total_accumulated_distance, total_target);
 
-        // ==================== 电机卡死看门狗(0701): 命令前进却位姿不推进 → 安全停 ====================
+        // ==================== 电机卡死看门狗(0701): 巡航期命令前进却位姿不推进 → 安全停 ====================
         // 治 0622 第3拐角右轮卡死(速度坍到~0.024m/s, ctrl_u 顶饱和, 81s 无检测)。按【位姿位移】判, 不信卡死后虚涨的里程列。
-        // 仅在真正命令前进(非拐角避让)时判; 拐角内另有独立停转看门狗。有推进/拐角后刷新基准, 正常沿边~0.17m/s 远>阈不误触。
-        if (config_stall_enable_ && !wall_avoiding && move_direction == 'w') {
-            float sdx = current_pose_.x - stall_ref_pose.x;
-            float sdy = current_pose_.y - stall_ref_pose.y;
-            float smoved = sqrt(sdx*sdx + sdy*sdy);
-            float swin = (ros::Time::now() - stall_ref_time).toSec();
-            if (smoved > config_stall_min_speed_ * swin) {
-                stall_ref_pose = current_pose_;              // 有推进 → 刷新基准(高水位)
+        // 评审 R4 M1(关键): 仅"巡航期"判定 —— 缓启动斜坡内 + 到点减速区(remaining<0.4, 命令本就降到 0.3×cmd_speed) 命令合法降速,
+        //   巡航阈(默认0.05)不适用; 否则减速区 0.075m/s×履带滑移(~0.68)≈0.05 会误触发 → success=false → move_state_=2 → 废掉整段(多段)会话。
+        //   非巡航期(缓启/减速/拐角/后退)持续刷新基准, 使进入巡航时窗口从零计。拐角内另有独立停转看门狗。0.4 与下方 slow_down_dist 保持一致。
+        {
+            bool in_softstart = (config_softstart_sec_ > 0.01f) &&
+                                ((ros::Time::now() - ramp_start_time).toSec() < config_softstart_sec_);
+            bool stall_cruise = (!wall_avoiding && move_direction == 'w' && remaining >= 0.4f && !in_softstart);
+            if (!config_stall_enable_ || !stall_cruise) {
+                stall_ref_pose = current_pose_;              // 非巡航期 → 刷新基准(不累计合法降速期的"停滞")
                 stall_ref_time = ros::Time::now();
-            } else if (swin > config_stall_timeout_sec_) {
-                ROS_ERROR("[stall] commanded forward but pose speed < %.3f m/s for %.1fs (motor/wheel stall?) -> STOP",
-                          config_stall_min_speed_, config_stall_timeout_sec_);
-                stop();
-                success = false;
-                break;
+            } else {
+                float sdx = current_pose_.x - stall_ref_pose.x;
+                float sdy = current_pose_.y - stall_ref_pose.y;
+                float smoved = sqrt(sdx*sdx + sdy*sdy);
+                float swin = (ros::Time::now() - stall_ref_time).toSec();
+                if (smoved > config_stall_min_speed_ * swin) {
+                    stall_ref_pose = current_pose_;          // 有推进 → 刷新基准(高水位)
+                    stall_ref_time = ros::Time::now();
+                } else if (swin > config_stall_timeout_sec_) {
+                    ROS_ERROR("[stall] cruise: commanded forward but pose speed < %.3f m/s for %.1fs (motor/wheel stall?) -> STOP",
+                              config_stall_min_speed_, config_stall_timeout_sec_);
+                    stop();
+                    success = false;
+                    break;
+                }
             }
         }
 
@@ -504,11 +526,12 @@ bool MoveController::walkStraightWithWallAvoidanceAdvanced(float distance, float
             bool point_blank = (front_dist > 0.05f && front_dist < config_corner_hard_floor_m_);
             if (point_blank) { point_blank_count++; } else { point_blank_count = 0; }
             bool pb_fire = (point_blank_count >= config_corner_point_blank_confirm_);
+            if (has_front_wall) front_clear_count = 0; else front_clear_count++;   // 净空连续帧(评审R4 L1)
 
             if (!has_front_wall) {
                 front_wall_detect_count = 0;
                 corner_armed = true;   // 前方净空 -> 重新武装
-                pb_consecutive = 0;    // 前方真净空=已脱离前墙(有前进进展) → 清点抵连发计数
+                if (front_clear_count >= config_corner_front_confirm_) pb_consecutive = 0;  // 须连续净空才清连发计数(单帧999 dropout不清, 防困死绕过上限)
             } else if ((corner_armed && ++front_wall_detect_count >= config_corner_front_confirm_) || pb_fire) {
                 // 点抵困死检测(评审 R1 MEDIUM): pb_fire 无视 corner_armed 且卡死看门狗每拐角复位→死角/窄兜里可能原地"转-仍撞-再转"循环绕过两道网、只被主超时兜住。
                 //   每次点抵触发计一次连发, 前方一净空即清(上面); 连发超上限=判定困住, 直接安全停(不再空转到主超时)。
