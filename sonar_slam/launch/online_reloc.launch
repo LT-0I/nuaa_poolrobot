@@ -1,0 +1,27 @@
+<!-- launch/online_reloc.launch
+     Layer A ONLINE relocalization node (manual-collect mode). Watches a manual_point_collector
+     task dir; localizes each completed stop point with the bit-exact vendored reloc kernel and
+     publishes /reloc/fix for the Layer B display. NON-INVASIVE (reads files, subscribes nothing),
+     does NOT modify manual_point_collector or the frozen reloc/ kernel. ASCII only.
+     Script lives in scripts/online_reloc/ (executable, shebang python3) -> rosrun/roslaunch find
+     it by name; its siblings reloc_stepper.py / online_reloc_core.py import via sys.path[0].
+     global_map = the reloc localization map (circle-pcd/global.pcd or mid_pcd/global.pcd per the
+     task<->map rule); NEVER mix pairings. task_dir empty => auto-pick newest task_* under watch_root
+     (launch the node first, then start collecting). -->
+<launch>
+    <arg name="global_map"  default=""/>                                   <!-- REQUIRED: reloc map global.pcd -->
+    <arg name="task_dir"    default=""/>                                   <!-- explicit task dir; empty = auto -->
+    <arg name="watch_root"  default="$(env HOME)/sonar_logs/manual_collect"/>
+    <arg name="reloc_dir"   default="$(find sonar_slam)/scripts/reloc"/>
+    <arg name="fix_topic"   default="/reloc/fix"/>
+    <arg name="poll_hz"     default="2.0"/>
+
+    <node pkg="sonar_slam" type="online_reloc_node.py" name="online_reloc" output="screen">
+        <param name="global_map" value="$(arg global_map)"/>
+        <param name="task_dir"   value="$(arg task_dir)"/>
+        <param name="watch_root" value="$(arg watch_root)"/>
+        <param name="reloc_dir"  value="$(arg reloc_dir)"/>
+        <param name="fix_topic"  value="$(arg fix_topic)"/>
+        <param name="poll_hz"    value="$(arg poll_hz)"/>
+    </node>
+</launch>

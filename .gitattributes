@@ -1,0 +1,29 @@
+# Force LF line endings on checkout for all text, regardless of the puller's git
+# core.autocrlf or the OS/tooling used to transfer the repo (e.g. Windows/MobaXterm).
+# Rationale (learned 2026-07-03 on the robot):
+#   - CRLF in an executed script's shebang makes the kernel look for 'python3\r'
+#     -> `/usr/bin/env: 'python3\r': No such file or directory` (roslaunch exit 127).
+# This pins CHECKOUT to LF so a robot pulling through Windows/autocrlf gets byte-identical
+# LF scripts. NOTE: the ROS python nodes/launch are LF in the repo; only they need this.
+* text=auto eol=lf
+
+# EXEMPTION: the sonar-vendor reloc kernel was vendored VERBATIM with Windows CRLF, and
+# CHECKSUMS.sha256 / assert_vendored_checksums are anchored to those exact CRLF bytes. These
+# files are imported / run via `python3 <file>` (never shebang-executed), so CRLF is harmless
+# to execution. Mark them -text so git NEVER normalizes them in either direction -- keeps the
+# byte-for-byte vendored copy and its checksums valid even under `git add --renormalize`.
+sonar_slam/scripts/reloc/*.py -text
+
+# Never normalize binaries (point clouds, maps, images, bags, compiled objects).
+*.pcd  binary
+*.pgm  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.bag  binary
+*.pyc  binary
+*.so   binary
+*.a    binary
+*.o    binary

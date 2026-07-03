@@ -1,0 +1,24 @@
+<!-- launch/online_reloc_demo.launch
+     Full LIVE localization+display pipeline on the real robot (manual-collect mode):
+       online_reloc  (Layer A): watches the collector task dir, localizes each stop point,
+                     publishes /reloc/fix.
+       reloc_display (Layer B): subscribes /reloc/fix + the robot's live /wheel_odom, shows a
+                     low-latency live pose + a trajectory that snaps onto each fix in rviz.
+     Prereqs (run separately): the robot driver publishing /wheel_odom, and manual_point_collector
+     (triggered by /point_collect/record) actually scanning stop points. This launch does NOT start
+     the driver or the collector. NEVER mix the task<->map pairing: global_map = reloc map
+     (global.pcd), display_map = display base (global_filter.pcd) for the SAME pool. ASCII only. -->
+<launch>
+    <arg name="global_map"  default=""/>   <!-- reloc localization map: circle-pcd/global.pcd | mid_pcd/global.pcd -->
+    <arg name="display_map" default=""/>   <!-- display base map: matching global_filter.pcd -->
+    <arg name="task_dir"    default=""/>   <!-- explicit collector task dir; empty = auto-newest -->
+
+    <include file="$(find sonar_slam)/launch/online_reloc.launch">
+        <arg name="global_map" value="$(arg global_map)"/>
+        <arg name="task_dir"   value="$(arg task_dir)"/>
+    </include>
+
+    <include file="$(find sonar_slam)/launch/reloc_display.launch">
+        <arg name="pcd_path" value="$(arg display_map)"/>
+    </include>
+</launch>
