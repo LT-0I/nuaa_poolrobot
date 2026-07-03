@@ -252,6 +252,9 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     phase_multi_submap_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/phase_multi/submaps", 1, true);
     // 运行级水泵闩锁发布器(latched): 任务起始 true / 结束·中止 false → move_controller 整段持泵
     pump_enable_pub_ = nh_.advertise<std_msgs::Bool>("/move_controller/pump_enable", 1, true);
+    // 开机主动撤闩一次(幂等, 不置 pump_latch_published_open_): 清除上次进程异常退出可能残留在 move_controller 的持泵闩锁。
+    // 本进程已删 openPumpLatch(从不置真), 故这仅清陈旧状态; latched 话题的迟到订阅者(move_controller 后启)也会收到此 false。
+    { std_msgs::Bool m; m.data = false; pump_enable_pub_.publish(m); }
     // 采集完成信号(latched): 采集全部停点完成时发本次会话目录(绝对路径), 触发离线拼图节点 sonar_stitch_node
     session_done_pub_ = nh_.advertise<std_msgs::String>("/sonar_scan/session_done", 1, true);
     ROS_INFO("[%s] enable_stitch=%s", MULTIMAP_VERSION, enable_stitch_ ? "true" : "false");
@@ -273,6 +276,42 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
     if (sweep_pace_sec_ < 0.02) sweep_pace_sec_ = 0.02;  // 下限0.02(仍~5x提速; 防 pace→0 每帧重建点云打满 OPi5 弱核致单角丢帧超时)
     if (sweep_pace_sec_ > 1.0)  sweep_pace_sec_ = 1.0;   // 上限防误设
     ROS_INFO("[sweep] per-angle pace=%.3fs (~%.0fs per 400-step circle floor); ~sweep_pace_sec default 0.1 clamp[0.02,1.0]", sweep_pace_sec_, sweep_pace_sec_ * 400.0);
+
+    // ===== 扫描前"泵关+转停"守门参数 (私有 ~ 命名空间) =====
+    nh_.param("pump_guard_enable",     pump_guard_enable_,     true);
+    nh_.param("pump_settle_sec",       pump_settle_sec_,       2.5);
+    nh_.param("pump_off_thresh",       pump_off_thresh_,       0.02);
+    nh_.param("pump_stopped_thresh",   pump_stopped_thresh_,   0.02);
+    nh_.param("pump_guard_timeout_sec",pump_guard_timeout_sec_,6.0);
+    nh_.param("pump_guard_stable_sec", pump_guard_stable_sec_, 0.5);
+    nh_.param("pump_cmd_fresh_sec",    pump_cmd_fresh_sec_,     0.3);
+    // stable<=0 退化配置会令下方 fresh 钳成<=0 -> age<fresh 永假 -> 健康发布者也永不确认(狂刷 ERROR); 先给 stable 一个下限。
+    if (pump_guard_stable_sec_ < 0.1) {
+        ROS_WARN("[pump-guard] pump_guard_stable_sec(%.3f) too small; floored to 0.1 (else gate can never confirm even with a healthy publisher)", pump_guard_stable_sec_);
+        pump_guard_stable_sec_ = 0.1;
+    }
+    // 新鲜判据须严格 < stable: 否则发布者已死时, 其陈旧末值(pump_off+stopped)仍能在 fresh 未过期的窗口内凑满 stable -> 假确认。
+    // 钳到 stable 的 0.6 倍, 确保死掉的发布者在 fresh 过期(=> ok_now 断) 时 stable 尚未满 -> 只能超时(报错仍扫), 不假确认。
+    if (pump_cmd_fresh_sec_ >= pump_guard_stable_sec_) {
+        double clamped = pump_guard_stable_sec_ * 0.6;
+        ROS_WARN("[pump-guard] pump_cmd_fresh_sec(%.3f) >= stable(%.3f); clamped to %.3f to keep fresh<stable (avoid dead-publisher false-confirm)",
+                 pump_cmd_fresh_sec_, pump_guard_stable_sec_, clamped);
+        pump_cmd_fresh_sec_ = clamped;
+    }
+    // 只读观测 /cmd_vel(绝对话题, 前导 / 忽略私有 ~ 命名空间 -> 解析为全局 /cmd_vel)。仅供守门判泵关(linear.y)+车停。
+    // 挂 pump_gate_queue_ 专用回调队列(非全局队列): 守门用 pump_gate_queue_.callAvailable() 只派发本 onCmdVel, 绝不重入本节点的 6 个服务回调;
+    // 主循环每拍另调 spinPumpGateQueue() 持续派发本队列, 令 last_cmd_* 无陈旧积压、新鲜判据可靠。
+    {
+        ros::SubscribeOptions so = ros::SubscribeOptions::create<geometry_msgs::Twist>(
+            "/cmd_vel", 1,
+            boost::bind(&MultiPositionSonarMapper::onCmdVel, this, _1),
+            ros::VoidConstPtr(), &pump_gate_queue_);
+        cmd_vel_sub_ = nh_.subscribe(so);
+    }
+    ROS_INFO("[pump-guard] enable=%s settle=%.1fs off_thr=%.3f stop_thr=%.3f timeout=%.1fs stable=%.2fs fresh=%.2fs",
+             pump_guard_enable_ ? "true" : "false", pump_settle_sec_, pump_off_thresh_,
+             pump_stopped_thresh_, pump_guard_timeout_sec_, pump_guard_stable_sec_, pump_cmd_fresh_sec_);
+
     // 确保缓冲区已重置
     full_scan_buffer_.reset();
     phase1_submaps_.reserve(20);        // 足够安全
@@ -1798,7 +1837,11 @@ void MultiPositionSonarMapper::startScanning() {
         ROS_ERROR("串口未初始化，无法开始扫描");
         return;
     }
-    
+
+    // 声呐发射前守门: 确认泵关+车停并 settle(覆盖所有 startScanning 入口)。此刻上一 scan_thread_ 已 join。
+    // 守门经 pump_gate_queue_ 专用队列 callAvailable 观测 /cmd_vel(只派发 onCmdVel、绝不重入服务回调), 只观测不发指令。见 waitPumpOffAndSettle。
+    waitPumpOffAndSettle();
+
     stop_requested_.store(false);
     is_scanning_.store(true);
     full_scan_complete_.store(false);
@@ -2977,6 +3020,98 @@ void MultiPositionSonarMapper::closePumpLatch() {
     ROS_INFO("pump latch CLOSED (run end)");
 }
 
+// ======================== 扫描前"泵关+转停"守门 ========================
+
+void MultiPositionSonarMapper::onCmdVel(const geometry_msgs::Twist::ConstPtr& msg) {
+    // 只读观测: 缓存最近 /cmd_vel 分量 + 到达时刻(Twist 无 header)。不发指令、不改运动状态。
+    last_cmd_lin_x_ = msg->linear.x;
+    last_cmd_lin_y_ = msg->linear.y;   // 泵占空(0~1); 扫描前须归零
+    last_cmd_ang_z_ = msg->angular.z;
+    last_cmd_stamp_ = ros::Time::now();
+}
+
+void MultiPositionSonarMapper::spinPumpGateQueue() {
+    // 主循环每拍派发守门专用队列(仅 onCmdVel), 令 last_cmd_* 持续新鲜、守门入口无陈旧积压。
+    // 守门运行时主循环阻塞(单线程同栈), 那期间改由守门自身 callAvailable 派发, 二者不并发。
+    pump_gate_queue_.callAvailable(ros::WallDuration(0));
+}
+
+void MultiPositionSonarMapper::logPumpGate(int idx, bool confirmed, double elapsed_s, double age_s,
+                                           double lin_y, double lin_x, double ang_z, const char* note) {
+    // 守门裁决落盘(CLAUDE.md: 数据一律写文件并标注有效性)。尤其"报错仍扫"策略下, 本 CSV 是事后判定
+    // "哪些停点是泵未确认关就扫的"的唯一依据(confirmed=0 且 note=TIMEOUT... 即泵未确认)。
+    std::string path = session_dir_ + "pump_gate_log.csv";   // session_dir_ 已以 / 结尾, 不再前置 /
+    std::ofstream f(path.c_str(), std::ios::app | std::ios::ate);  // ate: open 即定位末尾, tellp 反映真实文件大小
+    if (!f.is_open()) { ROS_WARN("[pump-guard] cannot open %s for gate log", path.c_str()); return; }
+    if (f.tellp() == std::streampos(0)) {   // 表头按"文件为空"判(不依赖 idx==0; 即使首次 open 失败也不会缺表头)
+        f << "gate_idx,confirmed,elapsed_s,last_cmd_age_s,last_lin_y_pump,last_lin_x,last_ang_z,scanned_anyway,note\n";
+    }
+    f << idx << "," << (confirmed ? 1 : 0) << ","
+      << std::fixed << std::setprecision(3) << elapsed_s << "," << age_s << ","
+      << lin_y << "," << lin_x << "," << ang_z << ",1," << note << "\n";
+    f.close();
+}
+
+bool MultiPositionSonarMapper::waitPumpOffAndSettle() {
+    // 任务要求(用户确认): 声呐扫描前须泵关且车停。区分 CLAUDE.md 宪法红线——宪法红线是"声呐绝不在空气中发射(烧换能器)",
+    //   由入水判定/操作规程把关; "扫描时关泵"是本任务作业要求, 非宪法条款。
+    // move_controller 已"行走开泵/停车关泵/剩0.3m提前关"; 车停 => 泵应归零。此处观测 /cmd_vel 显式确认后再 settle,
+    // 让电机/泵物理转停到位才交给声呐线程。只读只观测, 不发任何指令、不碰 move_controller/驱动。
+    // 重入/线程安全: 观测挂 pump_gate_queue_ 专用队列, 守门用 callAvailable 只派发 onCmdVel, 绝不重入本节点服务回调
+    //   (否则守门期挂起的 /start_phase1_mapping 会嵌套再起扫描线程双写声呐串口, /stop_* 会被吞成孤儿扫描线程持续发射)。
+    //   调用时上一 scan_thread_ 已 join, 读写 last_cmd_* 均在主线程, 无真并发。
+    const int gate_idx = pump_gate_idx_++;
+    if (!pump_guard_enable_) {
+        logPumpGate(gate_idx, false, 0.0, -1.0, last_cmd_lin_y_, last_cmd_lin_x_, last_cmd_ang_z_, "guard_disabled");  // confirmed=0: 守门关闭=泵未经验证(note 区分于真超时), 免下游"confirmed==1 即已验证"误判
+        return true;  // 守门关闭(调参/离线): 直接放行
+    }
+
+    ros::Time gate_start = ros::Time::now();
+    ros::Rate poll(20.0);                 // 20Hz 轮询
+    bool confirmed = false;
+    ros::Time stable_since;               // 条件连续满足起点
+    bool stable_running = false;
+    double age = 999.0, lin_y = last_cmd_lin_y_, lin_x = last_cmd_lin_x_, ang_z = last_cmd_ang_z_;  // 末次观测快照, 循环后落盘用
+
+    while (ros::ok() && (ros::Time::now() - gate_start).toSec() < pump_guard_timeout_sec_) {
+        pump_gate_queue_.callAvailable(ros::WallDuration(0));  // 只派发 onCmdVel(专用队列, 不重入服务回调), 刷新 last_cmd_*
+
+        age   = (ros::Time::now() - last_cmd_stamp_).toSec();
+        lin_y = last_cmd_lin_y_; lin_x = last_cmd_lin_x_; ang_z = last_cmd_ang_z_;
+        bool fresh    = (age < pump_cmd_fresh_sec_);   // /cmd_vel 新鲜(驱动/控制器在发); fresh<stable 保证死掉的发布者不会假确认
+        bool pump_off = (std::fabs(lin_y) <= pump_off_thresh_);
+        bool stopped  = (std::fabs(lin_x) <= pump_stopped_thresh_) &&
+                        (std::fabs(ang_z) <= pump_stopped_thresh_);
+        bool ok_now = fresh && pump_off && stopped;
+
+        if (ok_now) {
+            if (!stable_running) { stable_running = true; stable_since = ros::Time::now(); }
+            if ((ros::Time::now() - stable_since).toSec() >= pump_guard_stable_sec_) {
+                confirmed = true;
+                break;
+            }
+        } else {
+            stable_running = false;       // 条件中断, 重新计时
+        }
+        poll.sleep();
+    }
+
+    double elapsed = (ros::Time::now() - gate_start).toSec();
+    if (confirmed) {
+        ROS_INFO("[pump-guard] gate#%d pump-off & stopped CONFIRMED in %.1fs; settling %.1fs before sonar",
+                 gate_idx, elapsed, pump_settle_sec_);
+        logPumpGate(gate_idx, true, elapsed, age, lin_y, lin_x, ang_z, "confirmed");
+    } else {
+        ROS_ERROR("[pump-guard] gate#%d could NOT confirm pump-off/stopped in %.1fs (age=%.2f lin_y=%.3f lin_x=%.3f ang_z=%.3f) -- per user policy SCANNING ANYWAY; VERIFY PUMP OFF (sonar should not fire with pump on)",
+                  gate_idx, pump_guard_timeout_sec_, age, lin_y, lin_x, ang_z);
+        logPumpGate(gate_idx, false, elapsed, age, lin_y, lin_x, ang_z, "TIMEOUT_scanned_pump_UNCONFIRMED");
+    }
+
+    // 无论确认与否都物理沉降后返回(让电机/泵转停到位)。此 sleep 在 scan 计时(scan_duration)前, 不吃扫描时间。
+    ros::Duration(pump_settle_sec_).sleep();
+    return confirmed;
+}
+
 void MultiPositionSonarMapper::publishSessionDone() {
     // 采集全部停点完成后调用(仅正常/超时完成路径, 不在中止/失败路径); 发本次会话目录触发离线拼图。
     // enable_stitch_=false 时不发, 行为同接入前。session_dir_ 在构造期已建, 此刻 maps/odom 已全部落盘+flush。
@@ -2999,7 +3134,11 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
         ROS_INFO("=== 多位置建图启动 (共 %d 个位置) ===", phase_multi_num_positions_);
         ROS_INFO("==============================================");
 
-        openPumpLatch();   // 任务起始: 先开泵(在第一次扫描/移动前), 整段持泵
+        // 去闩锁: 直行扫描不再整段持泵(整段持泵会令扫描停顿期泵仍在转, 违反"声呐扫描时泵必须关")。
+        // 泵回落 move_controller 既有单段策略"行走开泵 / 停车关泵 / 剩0.3m提前关"; 每次移动前 stopScanning、
+        // move_straight 阻塞返回后才 startScanning => "正在扫描 <=> 车已停" => 扫描(车停)时泵自动关。
+        // (原此处 openPumpLatch() 已删。) 其余各 closePumpLatch() 撤闩点全部保留: pump_latch_published_open_
+        // 恒 false 使其幂等 no-op, 作为"中止/结束必撤闩"不变量的防御, 行为不变。
 
         phase_multi_step_ = 1;
         phase_multi_step_start_time_ = now;
@@ -4243,6 +4382,7 @@ int main(int argc, char** argv) {
 
     while (ros::ok()) {
         ros::spinOnce();
+        mapper.spinPumpGateQueue();   // 派发 /cmd_vel 专用队列(仅 onCmdVel), 令守门入口 last_cmd_* 持续新鲜、无陈旧积压
 
         // 确保TF被发布
         mapper.publishTF();

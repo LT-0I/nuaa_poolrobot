@@ -33,6 +33,17 @@
   <arg name="sweep_pace_sec"    default="0.1"/>           <!-- 扫描每角步间距(秒); 默认0.1=原值(零行为变化)。每圈400步=>0.1×400=40s固定死时间地板(回波已在等待循环收完, 此为纯角间idle); 现场可下调(如0.03)缩短单圈扫描, 不改点云内容(同400角/同range/同采样)。免重编。代码夹限[0,1] -->
   <!-- 注: required_circles 故意不暴露 —— multi_position_sonar_mapper.cpp 内硬写=1, 每点恒扫 1 圈 -->
 
+  <!-- ===== 扫描前"泵关+转停"守门 (mapper 私有命名空间, 安全项) =====
+       声呐入水扫描要求泵关且车停(CLAUDE.md 安全红线)。每次开扫前观测 /cmd_vel 确认 linear.y(泵)与运动均归零并 settle。
+       与 move_controller "行走开泵/停车关泵/剩0.3m提前关" 配合: 车停 => 泵应自动归零, 本守门只做显式校验+沉降, 不发指令。 -->
+  <arg name="pump_guard_enable"      default="true"/>   <!-- 守门总开关; false=直接放行(仅调参/无泵离线时用) -->
+  <arg name="pump_settle_sec"       default="2.5"/>    <!-- 确认/超时后物理转停沉降等待(秒); 在扫描计时前, 不吃 scan_duration -->
+  <arg name="pump_off_thresh"       default="0.02"/>   <!-- |linear.y| 判泵关阈值 -->
+  <arg name="pump_stopped_thresh"   default="0.02"/>   <!-- |linear.x|/|angular.z| 判车停阈值 -->
+  <arg name="pump_guard_timeout_sec" default="6.0"/>   <!-- 确认最长等待(秒); 到点仍未确认则打 ERROR 后【继续扫】(用户拍板: 报错仍扫, 不阻塞采集; 该点落 pump_gate_log.csv confirmed=0) -->
+  <arg name="pump_guard_stable_sec"  default="0.5"/>   <!-- 条件需连续保持此时长才算确认(秒) -->
+  <arg name="pump_cmd_fresh_sec"     default="0.3"/>   <!-- /cmd_vel 新鲜判据(秒); 须 < stable, 否则发布者死掉后陈旧末值也能假确认; 代码会钳位保证 < stable -->
+
   <!-- 直行模式: 无需人工对齐墙/无需找墙; 直接对准前进方向下水即可。acquire_wall_first 恒 false。 -->
   <arg name="acquire_wall_first" default="false"/>
   <arg name="acquire_distance"  default="0.5"/>
@@ -109,6 +120,14 @@
     <param name="phase1/acquire_wall_first" value="$(arg acquire_wall_first)"/>
     <param name="phase1/acquire_distance" value="$(arg acquire_distance)"/>
     <param name="enable_stitch"           value="$(arg enable_stitch)"/>
+    <!-- 扫描前"泵关+转停"守门 (私有 ~ 命名空间, 见顶部 arg 说明) -->
+    <param name="pump_guard_enable"       value="$(arg pump_guard_enable)"/>
+    <param name="pump_settle_sec"         value="$(arg pump_settle_sec)"/>
+    <param name="pump_off_thresh"         value="$(arg pump_off_thresh)"/>
+    <param name="pump_stopped_thresh"     value="$(arg pump_stopped_thresh)"/>
+    <param name="pump_guard_timeout_sec"  value="$(arg pump_guard_timeout_sec)"/>
+    <param name="pump_guard_stable_sec"   value="$(arg pump_guard_stable_sec)"/>
+    <param name="pump_cmd_fresh_sec"      value="$(arg pump_cmd_fresh_sec)"/>
   </node>
 
   <!-- 拼图节点(离线后处理, 受 enable_stitch 门控): 订阅 /sonar_scan/session_done -> 对会话目录跑 sonar_stitch.py 两遍

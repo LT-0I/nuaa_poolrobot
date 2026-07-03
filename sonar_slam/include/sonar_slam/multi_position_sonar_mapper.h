@@ -18,6 +18,7 @@
  */
  
 #include <ros/ros.h>
+#include <ros/callback_queue.h>  // 守门专用回调队列: /cmd_vel 挂独立队列, 守门只派发它、绝不重入服务回调
 #include <sys/stat.h>  // stat, mkdir
 #include <unistd.h>    // getcwd
 #include <ctime> 
@@ -33,6 +34,7 @@
 #include <tf/transform_datatypes.h>  
  
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Twist.h>   // 扫描前泵关+转停守门: 只读观测 /cmd_vel(泵=linear.y, 运动=linear.x/angular.z)
 
 
 #include <pcl_conversions/pcl_conversions.h>
@@ -246,6 +248,7 @@ public:
     void startScanning();
     void openPumpLatch();   // 运行级水泵闩锁: 任务起始置 /move_controller/pump_enable=true(整段持泵)
     void closePumpLatch();  // 任务结束/中止置 false(撤闩, 回落单段策略)
+    void spinPumpGateQueue();  // 主循环每拍派发守门专用队列(仅 onCmdVel), 令 last_cmd_* 持续新鲜、无陈旧积压
     void publishSessionDone();  // 采集全完成时发会话目录(触发离线拼图); 仅完成路径调用, enable_stitch_ 门控
     
     /**
@@ -652,6 +655,33 @@ private:
     bool pump_latch_published_open_ = false;  // 幂等闸: 防重复 open/close
     ros::Publisher session_done_pub_;         // /sonar_scan/session_done 采集完成信号(std_msgs::String=会话目录) 触发离线拼图节点; latched
     bool enable_stitch_ = true;               // 拼图开关(私有参数 ~enable_stitch); false=不发完成信号(行为同接入前)
+
+    // ===== 扫描前"泵关+转停"守门 (pump-off / robot-stopped gate before sonar fire) =====
+    // 任务要求(用户确认): 声呐扫描前必须关泵(扫描时不吸底) 且 车已停。注意与 CLAUDE.md 宪法安全红线区分——
+    //   宪法红线是"声呐绝不在空气中发射(烧换能器)", 由采集/操作规程与入水判定把关; "扫描时关泵"是本任务的作业要求, 非宪法条款。
+    // move_controller 已实现"行走开泵/停车关泵/剩0.3m提前关"; 车停 => 泵应自动归零。
+    // 本守门只在每次 startScanning 前观测 /cmd_vel 显式确认泵关+转停并 settle 一段, 不发任何指令, 不碰 move_controller/驱动。
+    ros::CallbackQueue pump_gate_queue_;      // /cmd_vel 专用回调队列: 守门用 callAvailable 只派发 onCmdVel, 绝不重入本节点的服务回调(防守门期嵌套 startScanning / 吞停止请求)
+    ros::Subscriber cmd_vel_sub_;             // 只读观测 /cmd_vel(绝对话题, 挂 pump_gate_queue_) 供守门判泵关+转停
+    // last-cmd 观测缓存: onCmdVel 只由主线程派发 pump_gate_queue_ 时写(主循环 spinPumpGateQueue 或守门 callAvailable),
+    //   scanningThread 的 spinOnce 只派发全局队列、不含 /cmd_vel; 调用守门时上一个 scan_thread_ 已 join, 读写均在主线程, 无真并发, 普通成员即可。
+    double last_cmd_lin_x_ = 0.0;             // 最近 /cmd_vel linear.x (前进差速)
+    double last_cmd_lin_y_ = 0.0;             // 最近 /cmd_vel linear.y (泵占空 0~1)
+    double last_cmd_ang_z_ = 0.0;             // 最近 /cmd_vel angular.z (转向)
+    ros::Time last_cmd_stamp_;                // 最近 /cmd_vel 到达时刻(Twist 无 header, 取接收时刻判新鲜)
+    bool   pump_guard_enable_ = true;         // 守门总开关(~pump_guard_enable)
+    double pump_settle_sec_ = 2.5;            // 确认(或超时)后物理转停沉降等待秒(~pump_settle_sec); 在 scan_duration 计时前, 不吃扫描时间
+    double pump_off_thresh_ = 0.02;           // |linear.y| 判泵关阈值(~pump_off_thresh)
+    double pump_stopped_thresh_ = 0.02;       // |linear.x|/|angular.z| 判车停阈值(~pump_stopped_thresh)
+    double pump_guard_timeout_sec_ = 6.0;     // 守门确认最长等待秒(~pump_guard_timeout_sec); 到点仍未确认则报错后继续扫(用户拍板: 报错仍扫)
+    double pump_guard_stable_sec_ = 0.5;      // 条件需连续保持时长才算确认秒(~pump_guard_stable_sec)
+    double pump_cmd_fresh_sec_ = 0.3;         // /cmd_vel 新鲜判据秒(~pump_cmd_fresh_sec); 须 < stable_sec, 否则死掉的发布者其陈旧末值也能凑满 stable 假确认; 构造期钳位保证 < stable
+    int    pump_gate_idx_ = 0;                // 守门调用序号(落盘 pump_gate_log.csv 用; 每次 startScanning 守门 +1)
+
+    bool waitPumpOffAndSettle();              // 扫描前守门: 观测确认泵关+车停并 settle; 返回是否已确认(超时也返回并继续扫)
+    void onCmdVel(const geometry_msgs::Twist::ConstPtr& msg);  // /cmd_vel 只读观测回调, 刷新 last_cmd_*
+    void logPumpGate(int idx, bool confirmed, double elapsed_s, double age_s,
+                     double lin_y, double lin_x, double ang_z, const char* note);  // 守门裁决落盘 session_dir_/pump_gate_log.csv
 
         // 角度信息结构体
     struct AngleInfo {
