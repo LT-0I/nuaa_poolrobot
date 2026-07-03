@@ -611,6 +611,7 @@ private:
     FullScanBuffer full_scan_buffer_;
     bool accumulating_scan_;
     int required_angles_for_full_scan_;   // 可配置参数
+    double sweep_pace_sec_ = 0.1;         // 扫描每角步间距(秒); 私有参数 ~sweep_pace_sec, 默认0.1=原硬编码值(零行为变化)
 
 
 

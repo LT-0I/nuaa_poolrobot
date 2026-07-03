@@ -264,6 +264,15 @@ MultiPositionSonarMapper::MultiPositionSonarMapper(ros::NodeHandle& nh)
      // ===== 从参数服务器读取配置 =====
     nh_.param("required_angles_for_full_scan", required_angles_for_full_scan_, 360);
     nh_.param("accumulating_scan", accumulating_scan_, true);
+    // 扫描每角步间距: 原硬编码 0.1s, 每圈 400 步 => 40s/圈固定死时间(回波在等待循环里已收完, 本 sleep 纯角间 idle)。
+    // 暴露为私有参数 ~sweep_pace_sec, 默认 0.1 = 与旧版逐字节等(零行为变化)。现场可下调缩短单圈扫描。
+    // ⚠ 降 pace 非严格保内容: 一圈完成到存盘有 ~0.2~0.7s 窗口(状态机 sleep + TF 等待), 期间下一圈近 angle-0 的
+    //   驻点重复帧会混入本子图(帧数随 pace 下降而增多), 略抬 angle-0 局部密度 -> 喂 MIN_INNER 滤波 -> 拼图非"跨 pace 逐字节等"。
+    //   角数/几何不变、默认 0.1 完全不受影响; 但降 pace 后须实测一圈(400/400 角收齐、无单角超时 WARN、拼图正常)再用于 demo。
+    nh_.param("sweep_pace_sec", sweep_pace_sec_, 0.1);
+    if (sweep_pace_sec_ < 0.02) sweep_pace_sec_ = 0.02;  // 下限0.02(仍~5x提速; 防 pace→0 每帧重建点云打满 OPi5 弱核致单角丢帧超时)
+    if (sweep_pace_sec_ > 1.0)  sweep_pace_sec_ = 1.0;   // 上限防误设
+    ROS_INFO("[sweep] per-angle pace=%.3fs (~%.0fs per 400-step circle floor); ~sweep_pace_sec default 0.1 clamp[0.02,1.0]", sweep_pace_sec_, sweep_pace_sec_ * 400.0);
     // 确保缓冲区已重置
     full_scan_buffer_.reset();
     phase1_submaps_.reserve(20);        // 足够安全
@@ -1350,9 +1359,9 @@ void MultiPositionSonarMapper::scanningThread() {
             scan_start_time_ = ros::Time::now();
         }
         
-        ros::Duration(0.1).sleep();
+        ros::Duration(sweep_pace_sec_).sleep();   // 角间步进间距(原硬编码0.1); 见 ~sweep_pace_sec
     }
-    
+
     ROS_INFO("扫描线程停止，最后角度: %d", current_angle_.load());
 }
 // ======================== 点云转换 ========================
