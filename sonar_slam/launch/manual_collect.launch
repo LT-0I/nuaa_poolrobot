@@ -1,0 +1,44 @@
+<!-- launch/manual_collect.launch
+     Wrapper for manual_point_collector (single 360deg / 400-angle sonar sweep per stop) -- the
+     ACQUISITION side of the g-onlinereloc localization demo (keyboard-driven collection). Purely
+     surfaces the scene-dependent params that otherwise stay at hardcoded defaults when the node is
+     started via a bare `rosrun`; behavior at defaults is IDENTICAL to `rosrun sonar_slam
+     manual_point_collector` (node name, service, topics all unchanged).
+
+     WHY THIS EXISTS: the collector has no launch file, so a stock `rosrun` silently uses
+     range_level=s0 (=4m sonar range) and /dev/ttyACM0 -- on a pool wider than ~8m the s0 range
+     drops points beyond 4m and the map/localization suffers. Set range_level to cover the pool
+     HALF-EXTENT (the node prints the real max_range at startup): s0=4m s1=6m s2=8m s3=10m
+     s4=12m s5=14m; s6..s11 rise to 24m but NON-linearly (s6=15 s7=16 s8=18 s9=20 s10=22 s11=24).
+
+     Node name is kept "manual_point_collector" so the service path /point_collect/record and the
+     private param namespace (/manual_point_collector/*) are exactly what a bare rosrun produced.
+     Output dir is hardcoded to $HOME/sonar_logs/manual_collect/task_<ts>/ (session-isolated);
+     keep online_reloc.launch watch_root at its default so the online node picks it up.
+
+     USAGE:
+       roslaunch sonar_slam manual_collect.launch range_level:=s2 serial_port:=/dev/ttyACM0
+       # then, at each stop point (robot stationary, IN WATER):
+       rosservice call /point_collect/record "{}"
+
+     SAFETY: the sonar transmits actively -- the robot MUST be IN WATER before any record call
+     (air transmit burns the transducer). ASCII only (robot terminal has no CJK font). -->
+<launch>
+    <arg name="serial_port"       default="/dev/ttyACM0"/>   <!-- Ping360 sonar serial port -->
+    <arg name="baudrate"          default="115200"/>
+    <arg name="range_level"       default="s0"/>              <!-- KEY scene param: sonar range band; MUST cover pool half-extent (s0=4m .. s11=24m) -->
+    <arg name="min_range"         default="0.0"/>             <!-- near-field cull (m); 0.0 = terminal4 default (no cull); raise to drop near-field noise -->
+    <arg name="odom_rate_hz"      default="20.0"/>            <!-- continuous odom logging rate during the sweep -->
+    <arg name="angle_timeout_sec" default="0.5"/>             <!-- per-angle echo-wait ceiling; full cost only on silent (grazing) angles -->
+    <arg name="scan_timeout_sec"  default="300.0"/>           <!-- whole-sweep SAFETY ceiling only (NOT a timer); code enforces >=5.0 -->
+
+    <node pkg="sonar_slam" type="manual_point_collector" name="manual_point_collector" output="screen">
+        <param name="serial_port"       value="$(arg serial_port)"/>
+        <param name="baudrate"          value="$(arg baudrate)"/>
+        <param name="range_level"       value="$(arg range_level)"/>
+        <param name="min_range"         value="$(arg min_range)"/>
+        <param name="odom_rate_hz"      value="$(arg odom_rate_hz)"/>
+        <param name="angle_timeout_sec" value="$(arg angle_timeout_sec)"/>
+        <param name="scan_timeout_sec"  value="$(arg scan_timeout_sec)"/>
+    </node>
+</launch>
