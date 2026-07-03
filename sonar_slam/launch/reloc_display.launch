@@ -1,0 +1,64 @@
+<!-- launch/reloc_display.launch
+     Layer B reloc DISPLAY (read-only rviz visualization). Two-lane trajectory:
+       lane 1 (live)       = geometric-DR pose + growing blue tip (low latency)
+       lane 2 (on fix)     = linear KF + RTS smoother, redraws the blue line through every fix
+     Red anchors = raw poses_in_map (passthrough). Does NOT touch motion/driver/sonar. ASCII only.
+     Scripts live in scripts/online_dr/ (executable, shebang python3) -> rosrun/roslaunch find them by name.
+     pcd_path/corrected_path are task-specific: pass task<->map per the task<->map rule (loc uses global*.pcd
+     for the base map; the DISPLAY base map is global_filter.pcd). -->
+<launch>
+    <!-- required, task-specific -->
+    <arg name="corrected_path" default="$(find sonar_slam)/scripts/reloc/corrected.py"/>
+    <arg name="pcd_path"       default=""/>   <!-- base map (global_filter.pcd for the matching task) -->
+
+    <!-- topics / frames -->
+    <arg name="map_frame"      default="map"/>
+    <arg name="odom_topic"     default="/wheel_odom"/>
+    <arg name="fix_topic"      default="/reloc/fix"/>
+
+    <!-- lane / policy -->
+    <arg name="use_filter"     default="true"/>   <!-- false = legacy est-only display -->
+    <arg name="show_coarse"    default="true"/>   <!-- draw a coarse line from fix1 (else wait for 2 separated fixes) -->
+    <arg name="use_scale"      default="true"/>
+    <arg name="min_fixes"      default="2"/>
+
+    <!-- KF / trajectory (data-fit defaults; see design doc) -->
+    <arg name="q_xy_per_m"     default="0.012"/>
+    <arg name="q_xy_floor"     default="1e-8"/>
+    <arg name="sigma_fix_xy"   default="0.02"/>
+    <arg name="node_min_step"  default="0.03"/>
+    <arg name="max_nodes"      default="20000"/>
+    <arg name="init_var"       default="1e6"/>
+    <arg name="bind_max_dist"  default="0.5"/>
+
+    <!-- publish rates / display -->
+    <arg name="publish_hz"        default="10.0"/>
+    <arg name="path_publish_hz"   default="5.0"/>
+    <arg name="status_publish_hz" default="2.0"/>
+    <arg name="path_min_step"     default="0.03"/>
+    <arg name="path_max"          default="5000"/>
+
+    <node pkg="sonar_slam" type="display_node.py" name="reloc_display" output="screen">
+        <param name="corrected_path"    value="$(arg corrected_path)"/>
+        <param name="pcd_path"          value="$(arg pcd_path)"/>
+        <param name="map_frame"         value="$(arg map_frame)"/>
+        <param name="odom_topic"        value="$(arg odom_topic)"/>
+        <param name="fix_topic"         value="$(arg fix_topic)"/>
+        <param name="use_filter"        value="$(arg use_filter)"/>
+        <param name="show_coarse"       value="$(arg show_coarse)"/>
+        <param name="use_scale"         value="$(arg use_scale)"/>
+        <param name="min_fixes"         value="$(arg min_fixes)"/>
+        <param name="q_xy_per_m"        value="$(arg q_xy_per_m)"/>
+        <param name="q_xy_floor"        value="$(arg q_xy_floor)"/>
+        <param name="sigma_fix_xy"      value="$(arg sigma_fix_xy)"/>
+        <param name="node_min_step"     value="$(arg node_min_step)"/>
+        <param name="max_nodes"         value="$(arg max_nodes)"/>
+        <param name="init_var"          value="$(arg init_var)"/>
+        <param name="bind_max_dist"     value="$(arg bind_max_dist)"/>
+        <param name="publish_hz"        value="$(arg publish_hz)"/>
+        <param name="path_publish_hz"   value="$(arg path_publish_hz)"/>
+        <param name="status_publish_hz" value="$(arg status_publish_hz)"/>
+        <param name="path_min_step"     value="$(arg path_min_step)"/>
+        <param name="path_max"          value="$(arg path_max)"/>
+    </node>
+</launch>
