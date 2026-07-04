@@ -12,6 +12,8 @@
     <arg name="global_map"  default=""/>   <!-- reloc localization map: circle-pcd/global.pcd | mid_pcd/global.pcd -->
     <arg name="display_map" default=""/>   <!-- display base map: matching global_filter.pcd -->
     <arg name="task_dir"    default=""/>   <!-- explicit collector task dir; empty = auto-newest -->
+    <arg name="use_rviz"    default="true"/>                                   <!-- start rviz to view the localization; set false on a headless robot (then run rviz on a laptop, Fixed Frame=map) -->
+    <arg name="rviz_config" default="$(find sonar_slam)/config/reloc.rviz"/>   <!-- Layer B display config: base map + two-lane trajectory + fix anchors -->
 
     <include file="$(find sonar_slam)/launch/online_reloc.launch">
         <arg name="global_map" value="$(arg global_map)"/>
@@ -21,4 +23,7 @@
     <include file="$(find sonar_slam)/launch/reloc_display.launch">
         <arg name="pcd_path" value="$(arg display_map)"/>
     </include>
+
+    <!-- View the localization (read-only). map=base cloud, blue=KF trajectory, red=fix anchors, green=live pose. -->
+    <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="reloc_rviz" args="-d $(arg rviz_config)" output="screen"/>
 </launch>

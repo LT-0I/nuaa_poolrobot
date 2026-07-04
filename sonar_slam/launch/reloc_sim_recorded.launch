@@ -1,0 +1,44 @@
+<!-- launch/reloc_sim_recorded.launch
+     RECORDED-DATA SIM of the g localization+display flow (no water, no live sonar, no driver).
+     Brings up the REAL Layer A (online_reloc) + Layer B (reloc_display) + rviz via online_reloc_demo,
+     fed by a PRE-RECORDED task dir, and replays that task's odom as /wheel_odom via feed_odom_recorded.
+     It NEVER starts manual_point_collector / the driver -> the sonar cannot transmit.
+
+     Localization IS genuinely exercised: Layer A reads the recorded sonar submaps (task_dir/maps/*.pcd)
+     and runs the real BBS+ICP kernel; the feeder only supplies odom for the display's live lane + fix
+     anchoring. The FIRST fix runs a global BBS = MINUTES on the Orange Pi 5 (ARM); be patient, do not
+     Ctrl-C while it is thinking. Green live pose renders only after that first fix (recorded odom is all
+     in the past, so the feeder republishes the last pose - see feed_odom_recorded.py).
+
+     task<->map IRON RULE (never mix): task_z -> circle-pcd/global.pcd (reloc) + global_filter.pcd
+     (display). Do NOT feed task_20260629_202646 (odom x-mirror recording bug).
+     ENV: needs the g open3d/numpy env (open3d 0.19.0 / numpy 1.24.4) for Layer A.
+
+     TWO-COMMAND alternative (more robust on slow ARM startup - you watch the nodes come up first,
+     then feed; this is the workflow to prefer if the one-shot start_delay is not enough):
+       roslaunch sonar_slam online_reloc_demo.launch global_map:=<g> display_map:=<d> task_dir:=<t>
+       rosrun    sonar_slam feed_odom_recorded.py _task_dir:=<t> _speed:=15
+     ASCII only (robot terminal has no CJK font). -->
+<launch>
+    <arg name="task_dir"    default="$(env HOME)/sim_data/task_z"/>
+    <arg name="global_map"  default="$(env HOME)/sim_data/circle-pcd/global.pcd"/>          <!-- reloc map (task_z pair) -->
+    <arg name="display_map" default="$(env HOME)/sim_data/circle-pcd/global_filter.pcd"/>   <!-- display base map -->
+    <arg name="speed"       default="15"/>     <!-- odom replay x-speed -->
+    <arg name="hold_hz"     default="5"/>      <!-- post-replay last-pose republish (keeps the green lane renderable); 0 = off -->
+    <arg name="start_delay" default="15.0"/>   <!-- feeder waits this long so Layer A/B + rviz register before odom is published (cold ARM: Layer A imports open3d + preprocesses the map; be generous, or use the two-command path) -->
+    <arg name="use_rviz"    default="true"/>   <!-- false on a headless robot (run rviz on a laptop, Fixed Frame=map) -->
+
+    <include file="$(find sonar_slam)/launch/online_reloc_demo.launch">
+        <arg name="global_map"  value="$(arg global_map)"/>
+        <arg name="display_map" value="$(arg display_map)"/>
+        <arg name="task_dir"    value="$(arg task_dir)"/>
+        <arg name="use_rviz"    value="$(arg use_rviz)"/>
+    </include>
+
+    <node pkg="sonar_slam" type="feed_odom_recorded.py" name="online_feed_odom" output="screen">
+        <param name="task_dir"    value="$(arg task_dir)"/>
+        <param name="speed"       value="$(arg speed)"/>
+        <param name="hold_hz"     value="$(arg hold_hz)"/>
+        <param name="start_delay" value="$(arg start_delay)"/>
+    </node>
+</launch>
