@@ -161,6 +161,7 @@ private:
     int         baudrate_;
     double      scan_timeout_sec_;   // 单圈扫描的安全上限(整圈全无回波时防服务卡死); 非计时器, 正常按整圈结束
     double      angle_timeout_sec_;  // 单角等回波上限
+    double      sweep_pace_sec_;     // 角间节拍(收完本角回波后停这么久再转下一角); ~sweep_pace_sec, 默认0.1=原硬编码值
     std::string range_level_;
     double      odom_rate_hz_;
     double      min_range_;
@@ -251,11 +252,29 @@ ManualPointCollector::ManualPointCollector()
     // angle_timeout_sec: 单角等回波上限(回波通常几十 ms 即回; 0.5s 余量充足)。
     //   单圈用 0.5s 而非原版 1.5s: 池壁掠射多无回波, 1.5s x 多角会拖长单圈并撞上安全上限被截断。
     pnh_.param("angle_timeout_sec", angle_timeout_sec_, 0.5);
-    // scan_timeout_sec: 仅防卡死安全上限。默认 300 > 全无回波整圈 400x(0.5+0.1)=240s, 故正常整圈绝不被截断。
+    // scan_timeout_sec: 仅防卡死安全上限。默认 300 > 全无回波整圈 400x(angle_timeout+sweep_pace)@默认=400x(0.5+0.1)=240s,
+    //   故默认参数下正常整圈绝不被截断。⚠ 若上调 sweep_pace_sec/angle_timeout_sec 使 400x(二者和) 超过本值, 全静默圈会
+    //   在到 scan_timeout 时被截断为 PARTIAL -- 启动时会 WARN 提示(见下方 sweep_pace 读取处), 届时须同步上调本值。
     pnh_.param("scan_timeout_sec", scan_timeout_sec_, 300.0);
     if (odom_rate_hz_ < 1.0) odom_rate_hz_ = 1.0;
     if (angle_timeout_sec_ < 0.05) angle_timeout_sec_ = 0.05;
     if (scan_timeout_sec_ < 5.0) scan_timeout_sec_ = 5.0;
+    // sweep_pace_sec: 角间节拍(每角收完回波后停这么久再转下一角)。原硬编码 0.1s, 每圈 400 步 => 40s/圈死时间地板
+    //   (纯角间 idle, 回波已在上面的等待循环收完)。暴露为私有参数 ~sweep_pace_sec, 默认 0.1 = 与旧版逐字节等(零行为
+    //   变化); 现场可下调缩短单圈扫描, 不改点云内容(同 400 角/同 range)。与 f 分支 mapper 的 ~sweep_pace_sec 对齐。免重编。
+    pnh_.param("sweep_pace_sec", sweep_pace_sec_, 0.1);
+    if (sweep_pace_sec_ < 0.02) sweep_pace_sec_ = 0.02;  // 下限0.02(仍~5x提速; 防 pace->0 打满 OPi5 弱核致单角丢帧超时)
+    if (sweep_pace_sec_ > 1.0)  sweep_pace_sec_ = 1.0;   // 上限防误设
+    // 若角间节拍上调到让"全静默整圈"耗时超过 scan_timeout_sec, 整圈会在到点时被截断为 PARTIAL。启动即 WARN 提示同步上调超时。
+    {
+        double worst_circle_sec = 400.0 * (angle_timeout_sec_ + sweep_pace_sec_);
+        if (worst_circle_sec > scan_timeout_sec_) {
+            ROS_WARN("sweep may be truncated PARTIAL: a fully-silent 400-angle circle needs ~%.0fs "
+                     "= 400*(angle_timeout %.2f + sweep_pace %.3f) > scan_timeout_sec %.1f; raise "
+                     "scan_timeout_sec if you keep this pace.",
+                     worst_circle_sec, angle_timeout_sec_, sweep_pace_sec_, scan_timeout_sec_);
+        }
+    }
     {
         static const char* kLevels[] =
             {"s0","s1","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11"};
@@ -337,6 +356,8 @@ ManualPointCollector::ManualPointCollector()
              range_level_.c_str(), max_range_);
     ROS_INFO("  angle_timeout_sec=%.2f scan_timeout_sec=%.1f (SAFETY ceiling, NOT a timer)",
              angle_timeout_sec_, scan_timeout_sec_);
+    ROS_INFO("  sweep_pace_sec=%.3f (per-angle pace; ~%.0fs per 400-step circle floor; clamp[0.02,1.0])",
+             sweep_pace_sec_, sweep_pace_sec_ * 400.0);
     ROS_INFO("  odom_rate=%.1fHz min_range=%.2fm", odom_rate_hz_, min_range_);
     ROS_INFO("  task_dir=%s", task_dir_.c_str());
     ROS_INFO("  full odom track -> %sodom_full.csv ; sonar<->odom index -> %spoints_index.csv (record_full_odom=%d)",
@@ -786,9 +807,9 @@ void ManualPointCollector::runCollect(const std::string& point_dir) {
                ros::ok()) {
             pumpOnce(odom_ofs, next_odom, odom_period);
         }
-        // 4. 角间节拍 ~0.1s, 仍持续采 odom
+        // 4. 角间节拍 ~sweep_pace_sec (默认0.1s), 仍持续采 odom
         ros::Time pace_start = ros::Time::now();
-        while ((ros::Time::now() - pace_start).toSec() < 0.1 &&
+        while ((ros::Time::now() - pace_start).toSec() < sweep_pace_sec_ &&
                (ros::Time::now() - scan_start).toSec() < scan_timeout_sec_ &&
                ros::ok()) {
             pumpOnce(odom_ofs, next_odom, odom_period);
@@ -1189,6 +1210,7 @@ void ManualPointCollector::writeMeta(const std::string& dir, const ros::Time& t_
       << "angles_with_echo=" << angles_with_echo << " of 400 (distinct angles with a non-empty return, not frame count)\n"
       << "angle_timeout_sec=" << angle_timeout_sec_ << "\n"
       << "scan_timeout_sec=" << scan_timeout_sec_ << " (safety ceiling only, not a timer)\n"
+      << "sweep_pace_sec=" << sweep_pace_sec_ << " (per-angle idle pace; default 0.1)\n"
       << "deliverable=../maps/phase_multi_submap_" << point_counter_ << "_pos" << point_counter_
       << ".{pcd(binary)+pgm+yaml} (in this task's maps/; faithful to terminal-4 format/naming)\n"
       << "local_extra=cloud.pcd in this dir is an ASCII copy (CloudCompare-openable; verifies the binary)\n"

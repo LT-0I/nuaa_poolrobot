@@ -1,12 +1,12 @@
 <!-- launch/manual_collect.launch
-     Wrapper for manual_point_collector (single 360deg / 400-angle sonar sweep per stop) -- the
+     Wrapper for manual_point_collector (single 360deg / 400-angle sonar sweep per stop) - the
      ACQUISITION side of the g-onlinereloc localization demo (keyboard-driven collection). Purely
      surfaces the scene-dependent params that otherwise stay at hardcoded defaults when the node is
      started via a bare `rosrun`; behavior at defaults is IDENTICAL to `rosrun sonar_slam
      manual_point_collector` (node name, service, topics all unchanged).
 
      WHY THIS EXISTS: the collector has no launch file, so a stock `rosrun` silently uses
-     range_level=s0 (=4m sonar range) and /dev/ttyACM0 -- on a pool wider than ~8m the s0 range
+     range_level=s0 (=4m sonar range) and /dev/ttyACM0 - on a pool wider than ~8m the s0 range
      drops points beyond 4m and the map/localization suffers. Set range_level to cover the pool
      HALF-EXTENT (the node prints the real max_range at startup): s0=4m s1=6m s2=8m s3=10m
      s4=12m s5=14m; s6..s11 rise to 24m but NON-linearly (s6=15 s7=16 s8=18 s9=20 s10=22 s11=24).
@@ -21,7 +21,7 @@
        # then, at each stop point (robot stationary, IN WATER):
        rosservice call /point_collect/record "{}"
 
-     SAFETY: the sonar transmits actively -- the robot MUST be IN WATER before any record call
+     SAFETY: the sonar transmits actively - the robot MUST be IN WATER before any record call
      (air transmit burns the transducer). ASCII only (robot terminal has no CJK font). -->
 <launch>
     <arg name="serial_port"       default="/dev/ttyACM0"/>   <!-- Ping360 sonar serial port -->
@@ -31,6 +31,7 @@
     <arg name="odom_rate_hz"      default="20.0"/>            <!-- continuous odom logging rate during the sweep -->
     <arg name="angle_timeout_sec" default="0.5"/>             <!-- per-angle echo-wait ceiling; full cost only on silent (grazing) angles -->
     <arg name="scan_timeout_sec"  default="300.0"/>           <!-- whole-sweep SAFETY ceiling only (NOT a timer); code enforces >=5.0 -->
+    <arg name="sweep_pace_sec"    default="0.1"/>             <!-- per-angle idle pace (s); default 0.1 = old hardcoded value (byte-identical). 400 steps/circle => 0.1x400=40s floor; lower it (e.g. 0.03) to shorten a circle without changing cloud content (same 400 angles/range). Aligns with f branch ~sweep_pace_sec. No rebuild. clamp[0.02,1.0] -->
 
     <node pkg="sonar_slam" type="manual_point_collector" name="manual_point_collector" output="screen">
         <param name="serial_port"       value="$(arg serial_port)"/>
@@ -40,5 +41,6 @@
         <param name="odom_rate_hz"      value="$(arg odom_rate_hz)"/>
         <param name="angle_timeout_sec" value="$(arg angle_timeout_sec)"/>
         <param name="scan_timeout_sec"  value="$(arg scan_timeout_sec)"/>
+        <param name="sweep_pace_sec"    value="$(arg sweep_pace_sec)"/>
     </node>
 </launch>
