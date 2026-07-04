@@ -23,6 +23,10 @@
  *   - 本节点【不】发 /cmd_vel、不碰电机/水泵; 运动与泵由操作员的 teleop 负责。
  *   - 声呐与原版同样【会主动发射】: 必须【已入水】才可调用服务(空气中发射烧换能器)。
  *   - 单线程 ROS(ros::spin); CallbackAsyncSerial 自带 I/O 线程收串口。严禁 AsyncSpinner。
+ *     [下游契约·关系到扫描期关泵] /point_collect/record 必须【同步】: 整圈扫描真正
+ *     扫完才返回。teleop(wheel_teleop_keyboard.py 一键扫描 'c')靠"record 返回=扫完"
+ *     判定"此刻可还原水泵"; 若改成 AsyncSpinner/提前返回, teleop 会在声呐还在扫时就把
+ *     泵抬起来(静默无报警)。动本节点并发模型前, 先同步改 teleop 的关泵/还原时序。
  *   - 终端打印一律 ASCII(机上无中文字库)。
  *
  * 声呐串口/协议/扫描/点云代码移植自 multi_position_sonar_mapper(活仓 main)。

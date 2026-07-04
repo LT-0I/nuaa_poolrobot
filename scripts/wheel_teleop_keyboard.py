@@ -127,7 +127,15 @@ def publish_stop(pub, times=5, gap=0.03):
 def _record_worker(record_call, result, lock, done):
     """daemon 线程: 同步调用 record 服务(整圈扫描阻塞数分钟)。
     结果写入 result(受 lock 保护)后置位 done; 绝不碰 /cmd_vel 发布。
-    主循环只在 done 置位后、加锁读取 result, 故无并发写读竞态。"""
+    主循环只在 done 置位后、加锁读取 result, 故无并发写读竞态。
+
+    [同步契约 · 关系到扫描期关泵正确性] 本设计"扫描全程零泵、扫完才还原 pump"
+    的正确性完全依赖 /point_collect/record 是【同步】服务: record_call() 必须在整圈
+    扫描真正结束后才返回, 届时才 done.set() -> 主循环才在 SCANNING 分支还原泵。
+    collector 端 manual_point_collector.cpp 明写"单线程 ros::spin, 严禁 AsyncSpinner"
+    正是此契约的另一半。若将来把 collector 改成 AsyncSpinner / 提前返回, record_call()
+    会在扫描中途就返回 -> 主循环会【在声呐还在扫时就把泵抬起来】, 且无任何报警。
+    动 collector 并发模型前, 必须先改这里的还原时序(scan_done 语义)。"""
     try:
         resp = record_call()
         with lock:
