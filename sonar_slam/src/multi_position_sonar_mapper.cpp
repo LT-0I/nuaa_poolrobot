@@ -839,8 +839,13 @@ void MultiPositionSonarMapper::processScanFrame(int raw_angle, const MsgCmd2300&
     
     // ==================== 4. 数据累积 ====================
     if (valid_samples > 0) {
-        sonar_points_.push_back(sonar_point);
-        
+        // 累计缓冲写入(受 accum_mutex_ 保护): 主线程重建/落盘会拷此缓冲, 故写入须持锁。
+        // 临界区极短(仅一次 push_back), 不含任何重活。
+        {
+            std::lock_guard<std::mutex> lk(accum_mutex_);
+            sonar_points_.push_back(sonar_point);
+        }
+
         // 累积到全扫描缓冲区
         if (accumulating_scan_) {
             if (!full_scan_buffer_.angle_received[hw_angle_idx]) {
@@ -865,17 +870,16 @@ void MultiPositionSonarMapper::processScanFrame(int raw_angle, const MsgCmd2300&
         if (enable_csv_logging_) {
             logToCSV(sonar_point);
         }
-        
+
         // ==================== 5. 点云转换和地图更新 ====================
-        convertToPointCloud();
-        
-        // 直接更新地图（不做任何强度过滤）
-        // 注意：createOccupancyGrid 和 createCostMap 内部也需要修改
-        filterPointCloud();      // 保留但需修改内部逻辑为直接拷贝
-        createOccupancyGrid();   // 移除内部的几何约束和强度过滤
-        createCostMap();         // 移除内部的轮廓提取和强度过滤
-        publishMapData();
-        
+        // [方案A] 原本在此(串口I/O线程内)每帧做 convertToPointCloud/filterPointCloud/
+        //   createOccupancyGrid/createCostMap/publishMapData 的重活, 会在低核 OPi5 上把 I/O 线程打满、
+        //   拖慢下一角命令出线与回波解析 -> 单角/整圈超时(尤其 sweep_pace 调小时)。
+        // 现全部搬出 I/O 线程: 改由主线程周期(~2Hz, rebuildAndPublishMaps) + 落盘前强制刷新执行。
+        //   本回调只保留轻活: 解析 + 上面的累计缓冲写入 + full_scan_buffer_ 置位/累积。
+        //   注: 角收齐置位(full_scan_buffer_.angle_received/angles_completed)已在上方完成, 与显示刷新解耦,
+        //   故 scanningThread 的收角判定不受本改动影响; 发角节拍完全不变。
+
     } else {
         dropped_scans_++;
         if (dropped_scans_ % 100 == 0) {
@@ -1403,9 +1407,26 @@ void MultiPositionSonarMapper::scanningThread() {
 
     ROS_INFO("扫描线程停止，最后角度: %d", current_angle_.load());
 }
+// ======================== [方案A] 快照重建并发布(重活搬出串口I/O线程) ========================
+// 仅主线程调用(主循环 ~2Hz 显示 + saveCurrentPhaseMultiSubmap 落盘前强制刷新), 两者天然串行。
+// 步骤: 1. accum_mutex_ 下把 sonar_points_ 拷进 sonar_points_snapshot_(I/O线程只被阻塞这一次拷贝);
+//       2. 释放锁, 在快照上做 convert/filter/grid/cost/publish(全部重活在锁外, 绝不持 accum_mutex_ 做重活)。
+void MultiPositionSonarMapper::rebuildAndPublishMaps() {
+    {
+        std::lock_guard<std::mutex> lk(accum_mutex_);
+        sonar_points_snapshot_ = sonar_points_;   // 深拷贝一次(O(帧数), 远轻于下方重建/发布)
+    }
+    // 以下全部作用于 sonar_points_snapshot_ / pointcloud_ / 占据图, 仅主线程访问, 与落盘串行 -> 无并发。
+    convertToPointCloud();   // 读 sonar_points_snapshot_ 重建 pointcloud_
+    filterPointCloud();
+    createOccupancyGrid();
+    createCostMap();
+    publishMapData();
+}
+
 // ======================== 点云转换 ========================
 void MultiPositionSonarMapper::convertToPointCloud() {
-    std::lock_guard<std::mutex> lock(pointcloud_mutex_); 
+    std::lock_guard<std::mutex> lock(pointcloud_mutex_);
     pointcloud_->clear();
 
     //重要：声纳硬件坐标系定义
@@ -1425,9 +1446,11 @@ void MultiPositionSonarMapper::convertToPointCloud() {
 
 
     // 添加调试输出
+    // [方案A] 本函数改为消费主线程快照 sonar_points_snapshot_(由 rebuildAndPublishMaps 在 accum_mutex_
+    //   下从 sonar_points_ 拷得), 不再直接读 I/O 线程正在写的 sonar_points_ -> 无数据竞争。逐点数学不变。
     static bool first_debug = true;
-    if (first_debug && !sonar_points_.empty()) {
-        float original_angle = sonar_points_[0].angle * RAD_TO_DEG;
+    if (first_debug && !sonar_points_snapshot_.empty()) {
+        float original_angle = sonar_points_snapshot_[0].angle * RAD_TO_DEG;
         // ROS_WARN("角度处理: 原始角度=%.1f°, 应用旋转=%.1f°, 最终角度=%.1f°",
         //         original_angle, rotation_angle_deg,
         //         original_angle + rotation_angle_deg);
@@ -1438,10 +1461,10 @@ void MultiPositionSonarMapper::convertToPointCloud() {
     // 调试：输出前几个点的变换信息
     static int debug_point_count = 0;
     static const int MAX_DEBUG_POINTS = 10;
-    
-    for (const auto& sonar_point : sonar_points_) {
+
+    for (const auto& sonar_point : sonar_points_snapshot_) {   // [方案A] 消费快照, 非 I/O 线程正写的 sonar_points_
         float original_angle_deg = sonar_point.angle * RAD_TO_DEG;
-        
+
         for (size_t i = 0; i < sonar_point.ranges.size(); i++) {
             float range = sonar_point.ranges[i];
             float intensity = sonar_point.intensities[i];
@@ -1954,9 +1977,12 @@ bool MultiPositionSonarMapper::saveCostMap(const std::string& filename) {
 void MultiPositionSonarMapper::clearScanData() {
     ROS_INFO("开始清空所有数据...");
     
-    // 清空基础数据
-    sonar_points_.clear();
-    sonar_points_.shrink_to_fit();  // 释放内存
+    // 清空基础数据([方案A] 累计缓冲清空受 accum_mutex_ 保护, 防与 I/O 线程写竞争)
+    {
+        std::lock_guard<std::mutex> lk(accum_mutex_);
+        sonar_points_.clear();
+        sonar_points_.shrink_to_fit();  // 释放内存
+    }
     
     // 强制释放点云内存
     pointcloud_->clear();
@@ -2090,6 +2116,10 @@ bool MultiPositionSonarMapper::shouldGenerateDenseCloud() const {
 
 
 void MultiPositionSonarMapper::createEnhancedOccupancyGrid() {
+    // [方案A 警示·死函数] 本函数当前全仓无调用者(死代码)。若日后复用务必注意: 下方 2130+ 直接遍历
+    //   sonar_points_ 是无锁访问, 而 sonar_points_ 现由串口 I/O 线程在 accum_mutex_ 下写入 ->
+    //   直读活缓冲会与 I/O 写并发 = std::vector 数据竞争/UB。复用前须比照 rebuildAndPublishMaps:
+    //   先在 accum_mutex_ 下把 sonar_points_ 拷入 sonar_points_snapshot_, 再遍历快照, 切勿直读活缓冲。
     ROS_INFO("生成增强版高质量地图...");
     
     if (pointcloud_->empty() && sonar_points_.empty()) {
@@ -3310,8 +3340,11 @@ void MultiPositionSonarMapper::handlePhaseMultiMapping() {
                 full_scan_complete_.store(false);
                 scan_start_angle_ = 0;
                 
-                // 清空数据
-                sonar_points_.clear();
+                // 清空数据([方案A] 累计缓冲清空持 accum_mutex_)
+                {
+                    std::lock_guard<std::mutex> lk(accum_mutex_);
+                    sonar_points_.clear();
+                }
                 pointcloud_->clear();
                 filtered_pointcloud_->clear();
                 
@@ -3444,11 +3477,18 @@ void MultiPositionSonarMapper::saveCurrentPhaseMultiSubmap() {
     }
     
     submap.robot_pose = robot_pose;
-    
+
+    // [方案A] 落盘前强制从当前累计缓冲重建一次: I/O 线程已不再每帧重建 pointcloud_/occupancy_map_,
+    //   若只靠主循环 ~2Hz 刷新, 落盘时刻可能落后最新累计帧。此处显式刷一次, 保证下方读到的
+    //   pointcloud_ 与 occupancy_map_ 反映"落盘时刻的全部累计帧"(与现版逐帧重建后落盘的内容口径一致)。
+    //   须在下方 pointcloud_mutex_ 锁块之外调用(rebuildAndPublishMaps 内部会各自短暂持有 accum_mutex_/
+    //   pointcloud_mutex_ 后即释放), 避免嵌套。
+    rebuildAndPublishMaps();
+
     // ========== 锁内：保存点云和地图，不拷贝 ==========
     {
         std::lock_guard<std::mutex> lock(pointcloud_mutex_);
-        
+
         if (pointcloud_->empty()) {
             ROS_WARN("点云为空，跳过保存");
             return;
@@ -4066,8 +4106,11 @@ std::string MultiPositionSonarMapper::getPhaseMultiStatusString() const {
 void MultiPositionSonarMapper::resetForNextPosition() {
     ROS_INFO("准备切换到下一个位置，重置扫描状态...");
     
-    // 清空当前数据
-    sonar_points_.clear();
+    // 清空当前数据([方案A] 累计缓冲清空持 accum_mutex_)
+    {
+        std::lock_guard<std::mutex> lk(accum_mutex_);
+        sonar_points_.clear();
+    }
     // pointcloud_->clear();
     // filtered_pointcloud_->clear();
     
@@ -4161,9 +4204,17 @@ bool MultiPositionSonarMapper::saveRawSonarData(const std::string& filename, int
         
         // 写入表头
         raw_file << "angle_deg,point_index,distance_m,intensity\n";
-        
+
+        // [方案A] 累计缓冲改由 accum_mutex_ 保护。此处在锁内拷一份快照后即释放锁, 再在锁外写文件,
+        //   避免持锁做磁盘 I/O 拖住串口 I/O 线程。读取时刻仍是本函数被调用时的 sonar_points_(与现版一致)。
+        std::vector<SonarPoint> raw_snapshot;
+        {
+            std::lock_guard<std::mutex> lk(accum_mutex_);
+            raw_snapshot = sonar_points_;
+        }
+
         int total_points = 0;
-        for (const auto& sonar_point : sonar_points_) {
+        for (const auto& sonar_point : raw_snapshot) {
             float angle_deg = sonar_point.angle * RAD_TO_DEG;
             for (size_t i = 0; i < sonar_point.ranges.size(); i++) {
                 raw_file << std::fixed << std::setprecision(6)
@@ -4389,8 +4440,15 @@ int main(int argc, char** argv) {
    
             // 多位置模式
         mapper.handlePhaseMultiMapping();
-         
-        
+
+        // [方案A] 显示层刷新: 原本每帧在串口I/O线程做的点云/栅格重建+发布已删除, 改由主线程在此周期做。
+        //   10Hz 主循环里每 5 拍(=~2Hz, 人眼级足够)、且仅扫描中才刷新。落盘另有强制刷新(见 saveCurrentPhaseMultiSubmap)。
+        //   与 handlePhaseMultiMapping(含落盘)同在主线程顺序执行 -> 二者绝不并发, pointcloud_/占据图无需额外互斥。
+        //   不在 scanningThread 内做, 故不影响发角/收角节拍与 sweep_pace 语义。
+        if (loop_counter % 5 == 0 && mapper.isScanning()) {
+            mapper.rebuildAndPublishMaps();
+        }
+
         // 每5秒输出一次状态
         if (loop_counter % 50 == 0) {
             if (mapper.isPhaseMultiEnabled()) {

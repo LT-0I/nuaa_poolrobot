@@ -312,6 +312,15 @@ public:
      */
     void publishTF();
 
+    /**
+     * @brief 从累计缓冲(sonar_points_)重建点云/栅格并发布(显示+落盘前刷新)。
+     * 把原本每帧(串口I/O线程内)做的重活搬到主线程周期执行: 先在 accum_mutex_ 下把
+     * sonar_points_ 拷进 sonar_points_snapshot_(仅阻塞I/O线程这一次拷贝), 释放锁后
+     * 在快照上做 convert/filter/grid/cost/publish。主循环 ~2Hz 调(显示), 落盘前强制调一次(内容不变)。
+     * 仅主线程调用(主循环 + saveCurrentPhaseMultiSubmap), 两者天然串行, 故 pointcloud_/占据图无需额外互斥。
+     */
+    void rebuildAndPublishMaps();
+
      // 1. 启动定位模式（服务调用）
     void startLocalizationMode();
 
@@ -476,7 +485,8 @@ private:
 
   
     // ======================== 数据存储 ========================
-    std::vector<SonarPoint> sonar_points_;           // 处理后的声纳数据
+    std::vector<SonarPoint> sonar_points_;           // 处理后的声纳数据(I/O线程写, 受 accum_mutex_ 保护)
+    std::vector<SonarPoint> sonar_points_snapshot_;  // 主线程重建/落盘用快照(仅主线程访问, 无需锁; 由 rebuildAndPublishMaps 在 accum_mutex_ 下从 sonar_points_ 拷得)
     std::vector<SonarRawPoint> raw_points_buffer_;   // 原始数据缓冲区
     static const int MAX_RAW_POINTS = 1200;          // 最大原始点数
     
@@ -704,7 +714,10 @@ private:
 
      // ========== 线程同步 ==========
     std::mutex pointcloud_mutex_;    // 保护 pointcloud_ 和 filtered_pointcloud_
-    std::mutex map_mutex_; 
+    std::mutex map_mutex_;
+    // 保护 sonar_points_ 累计缓冲: I/O(串口)线程 processScanFrame 写 vs 主线程重建/落盘快照读。
+    // 只在"push一帧 / 拷快照 / 清空"这三处短临界区持有; 重活(点云/栅格重建)一律在锁外的快照上做, 绝不持此锁做重活。
+    std::mutex accum_mutex_;
 
  
     bool check_loop_closure_;  // 回环检测标志
