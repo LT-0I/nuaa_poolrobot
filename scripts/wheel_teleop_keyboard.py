@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-wheel_teleop_keyboard.py —— 键盘"左右轮独立"遥控（基于 mogo_teleop_keyboard.py 改）
+wheel_teleop_keyboard.py —— 键盘遥控：w/x/a/d 控前后左右 + t/g/y/h 单独微调左右轮
+                            （基于 mogo_teleop_keyboard.py 改）
 
-目的：用键盘分别给左轮 / 右轮一个转速设定值（坦克式差速遥控）。
+目的：主控用 w/x/a/d 控整车 前进/后退/左转/右转（差速）；t/g/y/h 保留"左轮/右轮
+      独立微调"（老坦克式细调），供需要单独给某侧轮设定值时用（如手动补偿走偏）。
 
 原理：机上驱动 mars_serial_server (hardware_driver.cpp::sendKeyboardVelCommand)
       订阅 /cmd_vel，再按差速公式反算出左右轮：
@@ -52,20 +54,21 @@ from std_srvs.srv import Trigger
 
 
 HELP = """\
-============== wheel_teleop_keyboard : independent L/R wheel ==============
- Layout (left column -> LEFT wheel, right column -> RIGHT wheel):
+========== wheel_teleop_keyboard : w/x/a/d drive + t/g/y/h wheel trim ==========
+ Move (throttle-style, setpoint PERSISTS until changed or STOP):
 
-       q          w          e
-    L wheel +   both +    R wheel +
-       a          s          d
-    L wheel -   STOP     R wheel -
-                  x
-               both -
+                    w  = forward
+        a = turn left    x = back    d = turn right
+
+ Per-wheel trim (independent L / R, the old tank-style fine control):
+        t / g : LEFT  wheel  +/- one step
+        y / h : RIGHT wheel  +/- one step
 
  Keys:
-   q / a : LEFT  wheel  +/- one step
-   e / d : RIGHT wheel  +/- one step
-   w / x : BOTH  wheels +/- one step (intended straight fwd/back)
+   w / x : move FORWARD / BACK  (both wheels +/- one step)
+   a / d : turn LEFT / RIGHT    (differential: a = L-,R+ ; d = L+,R-)
+   t / g : LEFT  wheel +/- one step (independent trim)
+   y / h : RIGHT wheel +/- one step (independent trim)
    s  or  SPACE : STOP  (zero both wheels and pump)
    - / = : step size   down / up   (0.005 .. 0.050)
    [ / ] : pump duty   down / up   (0.00 .. 1.00)  suction only, no thrust
@@ -79,10 +82,11 @@ HELP = """\
    Ctrl-C: quit (sends zero cmd_vel on exit)
 
  Each wheel clamped to +/- %.2f.  Publishing /cmd_vel continuously (~8 Hz).
- L == R  -> straight ;  L != R -> turn in place / curve.
- NOTE: which physical direction (L>0 = forward? CW vs CCW) must be
+ w/x move both wheels equally (keep current L-R turn bias) ; a/d change the
+ turn (L-R diff) ; t/g/y/h trim one wheel independently.
+ NOTE: which physical direction (w = forward? a = turn-left?) must be
  confirmed on the real robot before driving fast.
-==========================================================================
+================================================================================
 """
 
 
@@ -242,19 +246,25 @@ def main():
                     "\r\n[wheel_teleop] SCAN: stop + pump->0, settle %.1fs then record...\r\n"
                     % scan_settle_sec)
                 sys.stdout.flush()
-            elif key == 'q':
+            elif key == 'w':                     # FORWARD: both wheels +step
                 left = clamp(left + step, -wheel_max, wheel_max)
-            elif key == 'a':
-                left = clamp(left - step, -wheel_max, wheel_max)
-            elif key == 'e':
                 right = clamp(right + step, -wheel_max, wheel_max)
-            elif key == 'd':
+            elif key == 'x':                     # BACK: both wheels -step
+                left = clamp(left - step, -wheel_max, wheel_max)
                 right = clamp(right - step, -wheel_max, wheel_max)
-            elif key == 'w':
-                left = clamp(left + step, -wheel_max, wheel_max)
-                right = clamp(right + step, -wheel_max, wheel_max)
-            elif key == 'x':
+            elif key == 'a':                     # turn LEFT (CCW): L-step, R+step
                 left = clamp(left - step, -wheel_max, wheel_max)
+                right = clamp(right + step, -wheel_max, wheel_max)
+            elif key == 'd':                     # turn RIGHT (CW): L+step, R-step
+                left = clamp(left + step, -wheel_max, wheel_max)
+                right = clamp(right - step, -wheel_max, wheel_max)
+            elif key == 't':                     # LEFT wheel trim +step (independent)
+                left = clamp(left + step, -wheel_max, wheel_max)
+            elif key == 'g':                     # LEFT wheel trim -step (independent)
+                left = clamp(left - step, -wheel_max, wheel_max)
+            elif key == 'y':                     # RIGHT wheel trim +step (independent)
+                right = clamp(right + step, -wheel_max, wheel_max)
+            elif key == 'h':                     # RIGHT wheel trim -step (independent)
                 right = clamp(right - step, -wheel_max, wheel_max)
             elif key == '-':
                 step = clamp(step - 0.005, STEP_MIN, STEP_MAX)
