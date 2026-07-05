@@ -1356,9 +1356,14 @@ void MultiPositionSonarMapper::scanningThread() {
         ros::Time wait_start = ros::Time::now();
         const double TIMEOUT = 1.5;  // 固定100ms
 
-        while (!full_scan_buffer_.angle_received[expected_angle] && 
+        // [自join修复] 此处不再 ros::spinOnce(): 本等待条件 angle_received[] 由串口 boost::asio I/O 线程
+        //   (receiveDataCallback->processScanFrame)置位, 不经 ROS 默认回调队列, 故 spin 对本循环无用。
+        //   而默认队列只挂本节点 6 个 service(start/stop/*): 若在扫描线程里 spin, stop 服务会被派发到本线程
+        //   -> stopScanning()->scan_thread_.join() 自 join 当前线程 -> boost::thread_resource_error 崩节点。
+        //   删除后 service 只由主循环(main 的 spinOnce)派发, join 恒在主线程 join 扫描线程 = 合法。
+        //   /cmd_vel(泵门)走专用 pump_gate_queue_, 与默认队列/本线程无关, 不受影响。
+        while (!full_scan_buffer_.angle_received[expected_angle] &&
             (ros::Time::now() - wait_start).toSec() < TIMEOUT) {
-            ros::spinOnce();
             ros::Duration(0.005).sleep();
         }
 
@@ -1376,10 +1381,11 @@ void MultiPositionSonarMapper::scanningThread() {
             ros::Time wait_start = ros::Time::now();
             const double MAX_WAIT_TIME = 2.0;
             
-            while (full_scan_buffer_.angles_completed < required_angles_for_full_scan_ && 
+            // [自join修复] 同上: angles_completed 由串口 I/O 线程置位、不经默认队列; 删 ros::spinOnce() 免把
+            //   stop 服务派发到扫描线程致自 join 崩溃。默认队列(6 个 service)改由主循环 spin 统一派发。
+            while (full_scan_buffer_.angles_completed < required_angles_for_full_scan_ &&
                    (ros::Time::now() - wait_start).toSec() < MAX_WAIT_TIME) {
                 ros::Duration(0.01).sleep();
-                ros::spinOnce();
             }
             
             if (full_scan_buffer_.angles_completed < required_angles_for_full_scan_) {

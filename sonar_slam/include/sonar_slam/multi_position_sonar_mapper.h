@@ -674,7 +674,7 @@ private:
     ros::CallbackQueue pump_gate_queue_;      // /cmd_vel 专用回调队列: 守门用 callAvailable 只派发 onCmdVel, 绝不重入本节点的服务回调(防守门期嵌套 startScanning / 吞停止请求)
     ros::Subscriber cmd_vel_sub_;             // 只读观测 /cmd_vel(绝对话题, 挂 pump_gate_queue_) 供守门判泵关+转停
     // last-cmd 观测缓存: onCmdVel 只由主线程派发 pump_gate_queue_ 时写(主循环 spinPumpGateQueue 或守门 callAvailable),
-    //   scanningThread 的 spinOnce 只派发全局队列、不含 /cmd_vel; 调用守门时上一个 scan_thread_ 已 join, 读写均在主线程, 无真并发, 普通成员即可。
+    //   scanningThread 已不 spin 任何回调队列(自 join 修复删除了它的 spinOnce)、更不派发 /cmd_vel; 调用守门时上一个 scan_thread_ 已 join, 读写均在主线程, 无真并发, 普通成员即可。
     double last_cmd_lin_x_ = 0.0;             // 最近 /cmd_vel linear.x (前进差速)
     double last_cmd_lin_y_ = 0.0;             // 最近 /cmd_vel linear.y (泵占空 0~1)
     double last_cmd_ang_z_ = 0.0;             // 最近 /cmd_vel angular.z (转向)
